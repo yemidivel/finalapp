@@ -22,6 +22,7 @@ import {
   CardHeader,
   CardTitle,
 } from "../components/ui/card";
+import { Stagger } from "../../animations/Stagger";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
@@ -321,7 +322,7 @@ export function StoresPage() {
       return;
     }
     const store = managerStore;
-    addUser({
+    const newManager: User = {
       id: `U-${Date.now()}`,
       name: managerForm.name.trim(),
       email: managerForm.email.trim(),
@@ -330,12 +331,15 @@ export function StoresPage() {
       role: "Manager",
       status: "Active",
       assignedStoreIds: [store.id],
-    } as User);
+    };
+    addUser(newManager);
     setManagerStore(null);
     setAssignFormOpen(false);
     toast.success(`Manager assigned to ${store.name}`);
     switchStore(store.id);
+    loginUser(newManager);
     setAdminOverview(false);
+    toast.success(`Logged in as ${newManager.name} (Manager)`);
     navigate("/");
   };
 
@@ -359,18 +363,18 @@ export function StoresPage() {
       : "bg-gray-50 border-gray-100";
 
   return (
-    <div
-      className={`p-4 md:p-6 space-y-6 min-h-screen ${
-        theme === "dark" ? "bg-gray-950 text-gray-100" : "bg-gray-50/30"
+    <Stagger
+      className={`px-4 md:px-6 pt-2 pb-8 space-y-6 min-h-screen ${
+        theme === "dark" ? "bg-gray-900 text-gray-100" : "bg-gray-50/50"
       }`}
     >
       {/* Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className="text-xl font-black text-gray-900 dark:text-white tracking-tight">
+          <h1 className="text-3xl font-black text-gray-900 dark:text-white tracking-tight">
             Stores
           </h1>
-          <p className="text-xs text-gray-500 font-medium">
+          <p className="text-sm text-gray-500 font-medium">
             Oversee all business locations, their managers and performance.
           </p>
         </div>
@@ -624,7 +628,6 @@ export function StoresPage() {
                     size="icon"
                     className="h-10 w-10 rounded-xl border-gray-200 dark:border-gray-700"
                     onClick={() => openEdit(store)}
-                    title="Edit store"
                   >
                     <Pencil className="w-4 h-4" />
                   </Button>
@@ -634,7 +637,6 @@ export function StoresPage() {
                       size="icon"
                       className="h-10 w-10 rounded-xl border-gray-200 dark:border-gray-700 text-red-600 hover:text-red-700"
                       onClick={() => handleDelete(store)}
-                      title="Delete store"
                     >
                       <Trash2 className="w-4 h-4" />
                     </Button>
@@ -1349,6 +1351,6 @@ export function StoresPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </Stagger>
   );
 }

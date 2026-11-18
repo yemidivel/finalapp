@@ -30,6 +30,7 @@ import { BulkPOModal } from "../components/BulkPOModal";
 import { ReorderTable } from "../components/ReorderTable";
 import { motion } from "framer-motion";
 import { staggerContainer, fadeInUp } from "../../animations/variants";
+import { Stagger } from "../../animations/Stagger";
 import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 import * as XLSX from "xlsx";
@@ -158,8 +159,8 @@ export function ForecastsPage() {
       return {
         weekLabels: [] as string[],
         byProduct: {} as Record<number, Record<string, number>>,
-        productTotals: {} as Record<number, number>,
-        dailyRates: {} as Record<number, number>,
+        productTotals: {} as Record<string, number>,
+        dailyRates: {} as Record<string, number>,
       };
     }
 
@@ -187,7 +188,7 @@ export function ForecastsPage() {
     const recentKeys = allKeys.slice(-8);
 
     const byProduct: Record<number, Record<string, number>> = {};
-    const productTotals: Record<number, number> = {};
+    const productTotals: Record<string, number> = {};
 
     recentKeys.forEach((wk) => {
       weekBuckets[wk].forEach((tx) => {
@@ -208,7 +209,7 @@ export function ForecastsPage() {
       Math.ceil((now.getTime() - firstDate.getTime()) / (24 * 60 * 60 * 1000)),
     );
 
-    const dailyRates: Record<number, number> = {};
+    const dailyRates: Record<string, number> = {};
     Object.entries(productTotals).forEach(([pid, qty]) => {
       dailyRates[Number(pid)] = Math.round((qty / totalDays) * 10) / 10;
     });
@@ -719,12 +720,12 @@ export function ForecastsPage() {
   };
 
   return (
-    <div className="p-8 space-y-8 bg-gray-50/50 min-h-screen">
+    <Stagger className="px-8 pt-2 pb-8 space-y-8 bg-surface min-h-screen">
       {/* Page Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-3">
-            <h1 className="text-3xl font-black text-gray-900 tracking-tight">Stock Forecasts</h1>
+            <h1 className="text-3xl font-black text-gray-900 dark:text-white tracking-tight">Stock Forecasts</h1>
             {currentUser?.role === "Admin" && adminOverview && (
               <Badge className="bg-indigo-600 text-white border-none font-black text-[9px] uppercase tracking-wider px-2 py-0.5 rounded-lg">
                 All Stores
@@ -741,7 +742,7 @@ export function ForecastsPage() {
           {(isAdmin || isManager || canEdit("Forecasts")) && (
             <Button
               variant="outline"
-              className={`h-11 font-bold rounded-xl border-gray-200 gap-2 bg-white hover:bg-gray-50 transition-all shadow-sm ${isSimulating ? "border-amber-200 bg-amber-50 text-amber-700" : ""}`}
+              className={`h-11 font-bold rounded-xl border-outline-variant/40 gap-2 bg-surface-container-lowest hover:bg-surface-container-low transition-all shadow-sm ${isSimulating ? "border-amber-200 bg-amber-50 text-amber-700" : ""}`}
               onClick={handleToggleSimulation}
             >
               <Zap
@@ -768,7 +769,7 @@ export function ForecastsPage() {
                 <ChevronDown className="w-4 h-4 opacity-50" />
               </Button>
             </DropdownMenuTrigger>
-            <DropdownMenuContent align="end" className="w-48 p-2 rounded-xl border-gray-100 shadow-xl">
+            <DropdownMenuContent align="end" className="w-48 p-2 rounded-xl border-outline-variant/40 shadow-xl">
               <DropdownMenuItem className="rounded-lg gap-2 font-medium" onClick={() => handleExport("csv")}>
                 <FileSpreadsheet className="w-4 h-4 text-green-600" /> Export CSV
               </DropdownMenuItem>
@@ -781,7 +782,7 @@ export function ForecastsPage() {
       </div>
 
       {/* Filters / Scenarios */}
-      <Card className="border-none shadow-sm bg-white rounded-2xl">
+      <Card className="border-none shadow-sm bg-surface-container-lowest rounded-2xl">
         <CardContent className="p-6">
           <div className="grid grid-cols-1 md:grid-cols-4 gap-6">
             <div className="space-y-2">
@@ -789,7 +790,7 @@ export function ForecastsPage() {
                 <MapPin className="w-3 h-3" /> Store
               </label>
               <Select value={selectedStoreId} onValueChange={setSelectedStoreId}>
-                <SelectTrigger className="h-11 bg-gray-50 border-transparent rounded-xl focus:ring-indigo-600 font-medium">
+                <SelectTrigger className="h-11 bg-surface-container-low border-transparent rounded-xl focus:ring-indigo-600 font-medium">
                   <SelectValue placeholder="Select store" />
                 </SelectTrigger>
                 <SelectContent className="max-h-[280px] overflow-y-auto">
@@ -816,7 +817,7 @@ export function ForecastsPage() {
                   setSelectedProductId("all");
                 }}
               >
-                <SelectTrigger className="h-11 bg-gray-50 border-transparent rounded-xl focus:ring-indigo-600 font-medium">
+                <SelectTrigger className="h-11 bg-surface-container-low border-transparent rounded-xl focus:ring-indigo-600 font-medium">
                   <SelectValue placeholder="All Categories" />
                 </SelectTrigger>
                 <SelectContent className="max-h-[280px] overflow-y-auto">
@@ -838,7 +839,7 @@ export function ForecastsPage() {
                 value={selectedProductId}
                 onValueChange={setSelectedProductId}
               >
-                <SelectTrigger className="h-11 bg-gray-50 border-transparent rounded-xl focus:ring-indigo-600 font-medium">
+                <SelectTrigger className="h-11 bg-surface-container-low border-transparent rounded-xl focus:ring-indigo-600 font-medium">
                   <SelectValue placeholder="All Products" />
                 </SelectTrigger>
                 <SelectContent className="max-h-[280px] overflow-y-auto">
@@ -857,7 +858,7 @@ export function ForecastsPage() {
                 <Clock className="w-3 h-3" /> Time Range
               </label>
               <Select value={timeRange} onValueChange={setTimeRange}>
-                <SelectTrigger className="h-11 bg-gray-50 border-transparent rounded-xl focus:ring-indigo-600 font-medium">
+                <SelectTrigger className="h-11 bg-surface-container-low border-transparent rounded-xl focus:ring-indigo-600 font-medium">
                   <SelectValue placeholder="Time range" />
                 </SelectTrigger>
                 <SelectContent>
@@ -998,7 +999,7 @@ export function ForecastsPage() {
           },
         ].map((kpi, i) => (
           <motion.div key={i} variants={fadeInUp}>
-            <Card className="border-none shadow-sm bg-white rounded-2xl h-full">
+            <Card className="border-none shadow-sm bg-surface-container-lowest rounded-2xl h-full">
               <CardContent className="p-5 flex flex-col gap-3">
                 <div
                   className={`w-10 h-10 ${kpi.bg} rounded-xl flex items-center justify-center`}
@@ -1040,7 +1041,7 @@ export function ForecastsPage() {
 
       {/* Reorder Recommendations */}
       {showReorderTable && (
-        <Card className="border-none shadow-sm bg-white rounded-3xl overflow-hidden">
+        <Card className="border-none shadow-sm bg-surface-container-lowest rounded-3xl overflow-hidden">
           <CardHeader className="p-8 pb-4">
             <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
               <div>
@@ -1054,7 +1055,7 @@ export function ForecastsPage() {
               </div>
               <div className="flex items-center gap-3">
                 {selectedIds.size > 0 && (
-                  <span className="text-sm font-bold text-indigo-600 bg-indigo-50 px-3 py-1.5 rounded-lg animate-in fade-in slide-in-from-right-2">
+                  <span className="text-sm font-bold text-indigo-600 bg-primary-fixed px-3 py-1.5 rounded-lg animate-in fade-in slide-in-from-right-2">
                     Selected: {selectedIds.size} items
                   </span>
                 )}
@@ -1084,7 +1085,7 @@ export function ForecastsPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-8 text-xs border-gray-200 bg-white"
+                    className="h-8 text-xs border-outline-variant/40 bg-surface-container-lowest"
                     onClick={() => setReorderPage((p) => Math.max(1, p - 1))}
                     disabled={reorderPage === 1}
                   >
@@ -1096,7 +1097,7 @@ export function ForecastsPage() {
                         key={page}
                         variant={reorderPage === page ? "default" : "outline"}
                         size="sm"
-                        className={`h-8 w-8 p-0 text-xs ${reorderPage === page ? "bg-indigo-600 hover:bg-indigo-700" : "border-gray-200 bg-white"}`}
+                        className={`h-8 w-8 p-0 text-xs ${reorderPage === page ? "bg-indigo-600 hover:bg-indigo-700" : "border-outline-variant/40 bg-surface-container-lowest"}`}
                         onClick={() => setReorderPage(page)}
                       >
                         {page}
@@ -1106,7 +1107,7 @@ export function ForecastsPage() {
                   <Button
                     variant="outline"
                     size="sm"
-                    className="h-8 text-xs border-gray-200 bg-white"
+                    className="h-8 text-xs border-outline-variant/40 bg-surface-container-lowest"
                     onClick={() => setReorderPage((p) => Math.min(totalReorderPages, p + 1))}
                     disabled={reorderPage === totalReorderPages}
                   >
@@ -1137,7 +1138,7 @@ export function ForecastsPage() {
 
       {/* Bottom Split Cards */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
-        <Card className="border-none shadow-sm bg-white rounded-3xl overflow-hidden">
+        <Card className="border-none shadow-sm bg-surface-container-lowest rounded-3xl overflow-hidden">
           <CardContent className="p-6 space-y-4">
             <div className="flex justify-between items-center py-3 border-b border-gray-50">
               <span className="text-sm font-medium text-gray-500 uppercase tracking-wider">
@@ -1174,10 +1175,10 @@ export function ForecastsPage() {
           </CardContent>
         </Card>
 
-        <Card className="border-none shadow-sm bg-white rounded-3xl overflow-hidden">
+        <Card className="border-none shadow-sm bg-surface-container-lowest rounded-3xl overflow-hidden">
           <CardContent className="p-6 space-y-4">
-            <div className="p-4 bg-indigo-50 border border-indigo-100 rounded-2xl flex gap-4">
-              <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shrink-0 shadow-sm">
+            <div className="p-4 bg-primary-fixed border border-primary-fixed rounded-2xl flex gap-4">
+              <div className="w-10 h-10 bg-surface-container-lowest rounded-xl flex items-center justify-center shrink-0 shadow-sm">
                 <TrendingUp className="w-5 h-5 text-indigo-600" />
               </div>
               <div>
@@ -1190,7 +1191,7 @@ export function ForecastsPage() {
               </div>
             </div>
             <div className="p-4 bg-green-50 border border-green-100 rounded-2xl flex gap-4">
-              <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shrink-0 shadow-sm">
+              <div className="w-10 h-10 bg-surface-container-lowest rounded-xl flex items-center justify-center shrink-0 shadow-sm">
                 <Package className="w-5 h-5 text-green-600" />
               </div>
               <div>
@@ -1203,7 +1204,7 @@ export function ForecastsPage() {
               </div>
             </div>
             <div className="p-4 bg-orange-50 border border-orange-100 rounded-2xl flex gap-4">
-              <div className="w-10 h-10 bg-white rounded-xl flex items-center justify-center shrink-0 shadow-sm">
+              <div className="w-10 h-10 bg-surface-container-lowest rounded-xl flex items-center justify-center shrink-0 shadow-sm">
                 <AlertTriangle className="w-5 h-5 text-orange-600" />
               </div>
               <div>
@@ -1218,6 +1219,6 @@ export function ForecastsPage() {
           </CardContent>
         </Card>
       </div>
-    </div>
+    </Stagger>
   );
 }

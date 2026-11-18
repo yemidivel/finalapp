@@ -73,6 +73,7 @@ import { format } from "date-fns";
 import { cn } from "@/lib/utils";
 import { motion, AnimatePresence } from "framer-motion";
 import { staggerContainer, fadeInUp } from "../../animations/variants";
+import { Stagger } from "../../animations/Stagger";
 import { jsPDF } from "jspdf";
 import autoTable from "jspdf-autotable";
 import * as XLSX from "xlsx";
@@ -873,7 +874,7 @@ const generateVatPDF = (store: any, transactions: Transaction[], vatRate: number
   return doc.output("blob");
 };
 
-export function ReportsPage() {
+export function ReportsPage({ embedded = false }: { embedded?: boolean } = {}) {
   const { kpis, inventoryArray, transactions, allTransactions, allInventory, allStores, currency, currentStore, currentUser, formatCurrency, canEdit, canView, adminOverview } = useStore();
   const isAdmin = currentUser?.role === "Admin";
   const isAdminAllStores = isAdmin && adminOverview;
@@ -984,14 +985,14 @@ export function ReportsPage() {
       const monthStart = new Date(now.getFullYear(), now.getMonth() - i, 1);
       const monthEnd = new Date(now.getFullYear(), now.getMonth() - i + 1, 1);
 
-      const soldByProduct: Record<number, number> = {};
+      const soldByProduct: Record<string, number> = {};
       let soldTotal = 0;
 
       completedTx.forEach(tx => {
         const dt = new Date(tx.datetime);
         if (dt < monthStart || dt >= monthEnd) return;
         tx.items.forEach(item => {
-          const productId = Number(item.productId);
+          const productId = item.productId;
           const qty = Number(item.qty) || 0;
           soldTotal += qty;
           soldByProduct[productId] = (soldByProduct[productId] || 0) + qty;
@@ -1416,19 +1417,19 @@ export function ReportsPage() {
   };
 
   return (
-    <div className="p-8 space-y-8 bg-gray-50/30 min-h-screen">
+    <Stagger className={embedded ? "space-y-8" : "px-8 pt-2 pb-8 space-y-8 bg-surface min-h-screen"}>
         {/* Page Header */}
         <div className="flex flex-col md:flex-row md:items-center justify-between gap-6">
           <div>
             <div className="flex items-center gap-3">
-              <h1 className="text-3xl font-black text-gray-900 tracking-tight">Reports</h1>
+              <h1 className={embedded ? "text-lg font-black text-gray-900" : "text-3xl font-black text-gray-900 dark:text-white tracking-tight"}>Reports</h1>
               {isAdminAllStores && (
                 <Badge className="bg-indigo-600 text-white border-none font-black text-[9px] uppercase tracking-wider px-2 py-0.5 rounded-lg">
                   All Stores
                 </Badge>
               )}
             </div>
-            <p className="text-gray-500 font-medium mt-1">
+            <p className="text-sm text-gray-500 font-medium mt-1">
               Generate and download business reports
             </p>
           </div>
@@ -1451,24 +1452,24 @@ export function ReportsPage() {
           {[
             { 
               label: "Total Revenue", 
-              value: formatCurrency(kpis.totalRevenueToday), 
-              change: `${kpis.totalRevenueTodayChange > 0 ? "+" : ""}${kpis.totalRevenueTodayChange}%`, 
-              color: kpis.totalRevenueTodayChange >= 0 ? "text-green-600" : "text-red-600", 
-              bg: kpis.totalRevenueTodayChange >= 0 ? "bg-green-50" : "bg-red-50", 
+              value: formatCurrency(kpis.totalRevenue24h), 
+              change: `${kpis.totalRevenue24hChange > 0 ? "+" : ""}${kpis.totalRevenue24hChange}%`, 
+              color: kpis.totalRevenue24hChange >= 0 ? "text-green-600" : "text-red-600", 
+              bg: kpis.totalRevenue24hChange >= 0 ? "bg-green-50" : "bg-red-50", 
               icon: DollarSign 
             },
-            { label: "Sales Growth", value: `${kpis.totalSalesTodayChange > 0 ? "+" : ""}${kpis.totalSalesTodayChange}%`, change: "vs yesterday", color: "text-blue-600", bg: "bg-blue-50", icon: TrendingUp },
-            { label: "Units Sold", value: kpis.productsSoldToday.toLocaleString(), change: "Today", color: "text-purple-600", bg: "bg-purple-50", icon: Package },
-            { label: "Reports Generated", value: "24", change: "This month", color: "text-indigo-600", bg: "bg-indigo-50", icon: FileText },
+            { label: "Sales Growth", value: `${kpis.totalSales24hChange > 0 ? "+" : ""}${kpis.totalSales24hChange}%`, change: "vs previous 24h", color: "text-blue-600", bg: "bg-blue-50", icon: TrendingUp },
+            { label: "Units Sold", value: kpis.productsSold24h.toLocaleString(), change: "Last 24h", color: "text-purple-600", bg: "bg-purple-50", icon: Package },
+            { label: "Reports Generated", value: "24", change: "This month", color: "text-indigo-600", bg: "bg-primary-fixed", icon: FileText },
           ].map((stat, i) => (
             <motion.div key={i} variants={fadeInUp}>
-              <Card className="border-none shadow-sm bg-white rounded-3xl overflow-hidden group hover:shadow-md transition-all">
+              <Card className="border-none shadow-sm bg-surface-container-lowest rounded-3xl overflow-hidden group hover:shadow-md transition-all">
                 <CardContent className="p-6">
                   <div className="flex items-center justify-between mb-4">
                     <div className={`w-12 h-12 ${stat.bg} rounded-2xl flex items-center justify-center transition-transform group-hover:scale-110`}>
                       <stat.icon className={`w-6 h-6 ${stat.color}`} />
                     </div>
-                    <Badge variant="outline" className="text-[10px] font-bold border-indigo-100 text-indigo-600 animate-pulse">
+                    <Badge variant="outline" className="text-[10px] font-bold border-primary-fixed text-indigo-600 animate-pulse">
                       LIVE
                     </Badge>
                   </div>
@@ -1492,10 +1493,10 @@ export function ReportsPage() {
 
         {/* Generate Report Cards Row */}
         <div className="grid grid-cols-1 md:grid-cols-3 gap-6">
-          <Card className="border-none shadow-sm bg-white rounded-3xl group hover:shadow-md transition-all">
+          <Card className="border-none shadow-sm bg-surface-container-lowest rounded-3xl group hover:shadow-md transition-all">
             <CardContent className="p-6">
               <div className="flex items-center gap-4 mb-6">
-                <div className="w-12 h-12 bg-indigo-50 rounded-2xl flex items-center justify-center group-hover:bg-indigo-600 transition-colors">
+                <div className="w-12 h-12 bg-primary-fixed rounded-2xl flex items-center justify-center group-hover:bg-indigo-600 transition-colors">
                   <FileSpreadsheet className="w-6 h-6 text-indigo-600 group-hover:text-white transition-colors" />
                 </div>
                 <div>
@@ -1515,7 +1516,7 @@ export function ReportsPage() {
             </CardContent>
           </Card>
 
-          <Card className="border-none shadow-sm bg-white rounded-3xl group hover:shadow-md transition-all">
+          <Card className="border-none shadow-sm bg-surface-container-lowest rounded-3xl group hover:shadow-md transition-all">
             <CardContent className="p-6">
               <div className="flex items-center gap-4 mb-6">
                 <div className="w-12 h-12 bg-green-50 rounded-2xl flex items-center justify-center group-hover:bg-green-600 transition-colors">
@@ -1538,7 +1539,7 @@ export function ReportsPage() {
             </CardContent>
           </Card>
 
-          <Card className="border-none shadow-sm bg-white rounded-3xl group hover:shadow-md transition-all">
+          <Card className="border-none shadow-sm bg-surface-container-lowest rounded-3xl group hover:shadow-md transition-all">
             <CardContent className="p-6">
               <div className="flex items-center gap-4 mb-6">
                 <div className="w-12 h-12 bg-purple-50 rounded-2xl flex items-center justify-center group-hover:bg-purple-600 transition-colors">
@@ -1566,7 +1567,7 @@ export function ReportsPage() {
         {!isAdminAllStores && (
         <div className="grid grid-cols-1 lg:grid-cols-2 gap-8">
           {/* Left: Inventory Turnover */}
-          <Card className="border-none shadow-sm bg-white rounded-[2rem] overflow-hidden">
+          <Card className="border-none shadow-sm bg-surface-container-lowest rounded-[2rem] overflow-hidden">
             <CardHeader className="p-8 pb-2">
               <div className="flex items-center justify-between mb-2">
                 <div className="w-10 h-10 bg-purple-50 rounded-xl flex items-center justify-center">
@@ -1601,7 +1602,7 @@ export function ReportsPage() {
           </Card>
 
           {/* Right: Stockout Risk */}
-          <Card className="border-none shadow-sm bg-white rounded-[2rem] overflow-hidden">
+          <Card className="border-none shadow-sm bg-surface-container-lowest rounded-[2rem] overflow-hidden">
             <CardHeader className="p-8 pb-2">
               <div className="flex items-center justify-between mb-2">
                 <div className="w-10 h-10 bg-red-50 rounded-xl flex items-center justify-center">
@@ -1645,10 +1646,10 @@ export function ReportsPage() {
         )}
 
         {/* Tax / VAT Calculator */}
-        <Card className="border-none shadow-sm bg-white rounded-[2rem] overflow-hidden">
+        <Card className="border-none shadow-sm bg-surface-container-lowest rounded-[2rem] overflow-hidden">
           <CardHeader className="p-8 pb-4 border-b border-gray-50">
             <div className="flex items-center gap-3">
-              <div className="w-10 h-10 bg-indigo-50 rounded-xl flex items-center justify-center">
+              <div className="w-10 h-10 bg-primary-fixed rounded-xl flex items-center justify-center">
                 <Calculator className="w-5 h-5 text-indigo-600" />
               </div>
               <div>
@@ -1671,7 +1672,7 @@ export function ReportsPage() {
                     type="text" 
                     value={vatSales.toLocaleString()} 
                     readOnly
-                    className="h-14 pl-10 bg-gray-100 border-none rounded-2xl text-lg font-black focus:ring-0 cursor-not-allowed opacity-80"
+                    className="h-14 pl-10 bg-surface-container border-none rounded-2xl text-lg font-black focus:ring-0 cursor-not-allowed opacity-80"
                   />
                 </div>
               </div>
@@ -1683,7 +1684,7 @@ export function ReportsPage() {
                     type="number" 
                     value={vatRate} 
                     onChange={(e) => setVatRate(Number(e.target.value))} 
-                    className="h-14 pr-10 bg-gray-50 border-none rounded-2xl text-lg font-black focus:ring-2 focus:ring-indigo-100"
+                    className="h-14 pr-10 bg-surface-container-low border-none rounded-2xl text-lg font-black focus:ring-2 focus:ring-primary-container/30"
                   />
                 </div>
               </div>
@@ -1694,8 +1695,8 @@ export function ReportsPage() {
             </div>
 
             {isAdminAllStores && (
-              <div className="mt-8 rounded-2xl border border-gray-100 bg-gray-50/50 overflow-hidden">
-                <div className="px-5 py-3 border-b border-gray-100 flex items-center justify-between">
+              <div className="mt-8 rounded-2xl border border-outline-variant/40 bg-surface-container-low/50 overflow-hidden">
+                <div className="px-5 py-3 border-b border-outline-variant/40 flex items-center justify-between">
                   <p className="text-[10px] font-black text-gray-500 uppercase tracking-widest">
                     VAT Breakdown by Store
                   </p>
@@ -1740,7 +1741,7 @@ export function ReportsPage() {
               </Button>
               <Button 
                 variant="outline" 
-                className="h-12 px-8 rounded-xl bg-gray-50 border-gray-200 text-gray-600 hover:bg-gray-100 font-bold gap-2 transition-all"
+                className="h-12 px-8 rounded-xl bg-surface-container-low border-outline-variant/40 text-gray-600 hover:bg-surface-container font-bold gap-2 transition-all"
                 onClick={() => setIsScheduleModalOpen(true)}
               >
                 <Calendar className="w-5 h-5" />
@@ -1752,8 +1753,8 @@ export function ReportsPage() {
 
         {/* Schedule VAT Filing Modal */}
         <Dialog open={isScheduleModalOpen} onOpenChange={setIsScheduleModalOpen}>
-          <DialogContent className="sm:max-w-[500px] p-0 overflow-hidden rounded-[2rem] border-none shadow-2xl bg-white">
-            <DialogHeader className="p-8 pb-4 bg-gray-50/50 border-b border-gray-100">
+          <DialogContent className="sm:max-w-[500px] p-0 overflow-hidden rounded-[2rem] border-none shadow-2xl bg-surface-container-lowest">
+            <DialogHeader className="p-8 pb-4 bg-surface-container-low/50 border-b border-outline-variant/40">
               <div className="flex items-center gap-3">
                 <div className="w-12 h-12 bg-purple-600 rounded-2xl flex items-center justify-center shadow-lg shadow-purple-100">
                   <Calendar className="w-6 h-6 text-white" />
@@ -1774,7 +1775,7 @@ export function ReportsPage() {
                       <Button
                         variant={"outline"}
                         className={cn(
-                          "w-full h-12 justify-start text-left font-bold bg-gray-50 border-gray-100 rounded-xl",
+                          "w-full h-12 justify-start text-left font-bold bg-surface-container-low border-outline-variant/40 rounded-xl",
                           !filingDate && "text-muted-foreground"
                         )}
                       >
@@ -1800,7 +1801,7 @@ export function ReportsPage() {
                       placeholder="admin@example.com" 
                       value={filingEmail}
                       onChange={(e) => setFilingEmail(e.target.value)}
-                      className="h-12 bg-gray-50 border-gray-100 rounded-xl focus:ring-2 focus:ring-purple-100"
+                      className="h-12 bg-surface-container-low border-outline-variant/40 rounded-xl focus:ring-2 focus:ring-purple-100"
                     />
                   </div>
                   <div className="space-y-2">
@@ -1809,7 +1810,7 @@ export function ReportsPage() {
                       placeholder="0801 234 5678" 
                       value={filingPhone}
                       onChange={(e) => setFilingPhone(e.target.value)}
-                      className="h-12 bg-gray-50 border-gray-100 rounded-xl focus:ring-2 focus:ring-purple-100"
+                      className="h-12 bg-surface-container-low border-outline-variant/40 rounded-xl focus:ring-2 focus:ring-purple-100"
                     />
                   </div>
                 </div>
@@ -1821,7 +1822,7 @@ export function ReportsPage() {
                     rows={3}
                     value={filingNotes}
                     onChange={(e) => setFilingNotes(e.target.value)}
-                    className="bg-gray-50 border-gray-100 rounded-2xl focus:ring-2 focus:ring-purple-100 resize-none font-medium"
+                    className="bg-surface-container-low border-outline-variant/40 rounded-2xl focus:ring-2 focus:ring-purple-100 resize-none font-medium"
                   />
                 </div>
               </div>
@@ -1830,7 +1831,7 @@ export function ReportsPage() {
             <DialogFooter className="p-8 pt-0 flex flex-col sm:flex-row gap-3">
               <Button 
                 variant="outline" 
-                className="flex-1 h-14 rounded-2xl border-gray-200 font-bold hover:bg-gray-50 transition-all"
+                className="flex-1 h-14 rounded-2xl border-outline-variant/40 font-bold hover:bg-surface-container-low transition-all"
                 onClick={() => setIsScheduleModalOpen(false)}
               >
                 Cancel
@@ -1856,24 +1857,24 @@ export function ReportsPage() {
 
           <div className="grid grid-cols-1 gap-4">
             {availableReports.map((report) => (
-              <Card key={report.id} className="border-none shadow-sm bg-white rounded-3xl overflow-hidden group hover:shadow-md transition-all">
+              <Card key={report.id} className="border-none shadow-sm bg-surface-container-lowest rounded-3xl overflow-hidden group hover:shadow-md transition-all">
                 <CardContent className="p-6">
                   <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-6">
                     <div className="flex items-center gap-5 flex-1">
-                      <div className="w-14 h-14 bg-gray-50 rounded-2xl flex items-center justify-center group-hover:bg-indigo-50 transition-colors">
+                      <div className="w-14 h-14 bg-surface-container-low rounded-2xl flex items-center justify-center group-hover:bg-primary-fixed transition-colors">
                         <FileText className="w-7 h-7 text-gray-400 group-hover:text-indigo-600 transition-colors" />
                       </div>
                       <div className="flex-1">
                         <div className="flex items-center gap-2 mb-1">
                           <h3 className="text-lg font-black text-gray-900 group-hover:text-indigo-600 transition-colors">{report.name}</h3>
                           {report.hasAI && (
-                            <Badge className="bg-indigo-50 text-indigo-700 border-indigo-100 font-bold text-[10px]">AI INSIGHT READY</Badge>
+                            <Badge className="bg-primary-fixed text-indigo-700 border-primary-fixed font-bold text-[10px]">AI INSIGHT READY</Badge>
                           )}
                         </div>
                         <p className="text-sm text-gray-500 font-medium">{report.description}</p>
                         <p className="text-xs text-indigo-500 font-bold mt-1">{report.stat}</p>
                         <div className="flex flex-wrap items-center gap-3 mt-2">
-                          <Badge variant="outline" className="bg-gray-50/50 border-gray-100 text-gray-500 font-bold">{report.category}</Badge>
+                          <Badge variant="outline" className="bg-surface-container-low/50 border-outline-variant/40 text-gray-500 font-bold">{report.category}</Badge>
                           <Badge className="bg-green-50 text-green-700 border-green-100 font-bold">{report.format}</Badge>
                           <span className="text-xs text-gray-400 font-bold uppercase tracking-widest">{report.date}</span>
                         </div>
@@ -1923,15 +1924,15 @@ export function ReportsPage() {
             </div>
             <div className="grid grid-cols-1 gap-2">
               {generationHistory.map((entry, idx) => (
-                <div key={idx} className="flex items-center justify-between px-5 py-3 bg-white rounded-2xl border border-gray-50">
+                <div key={idx} className="flex items-center justify-between px-5 py-3 bg-surface-container-lowest rounded-2xl border border-gray-50">
                   <div className="flex items-center gap-3">
-                    <CheckCircle2 className="w-4 h-4 text-green-500" />
+                    <CheckCircle2 className="w-4 h-4 text-[#00A651]" />
                     <div>
                       <p className="text-sm font-bold text-gray-900">{entry.fileName}</p>
                       <p className="text-xs text-gray-400 font-medium">{new Date(entry.generatedAt).toLocaleString()}</p>
                     </div>
                   </div>
-                  <Badge className="bg-gray-50 text-gray-500 border-gray-100 font-bold">{entry.format}</Badge>
+                  <Badge className="bg-surface-container-low text-gray-500 border-outline-variant/40 font-bold">{entry.format}</Badge>
                 </div>
               ))}
             </div>
@@ -1960,7 +1961,7 @@ export function ReportsPage() {
           reportName={reportToShare?.name || "Report"} 
           reportType={reportToShare?.type || "General Report"}
         />
-      </div>
+      </Stagger>
   );
 }
 

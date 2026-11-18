@@ -9,36 +9,25 @@ import {
   CreditCard,
   TrendingUp,
   LineChart,
-  FileText,
   Bell,
-  Settings,
-  Search,
-  ChevronDown,
   ChevronRight,
   Menu,
-  User as UserIcon,
   LogOut,
   Users,
   Building2,
   RefreshCcw,
   ArrowLeft,
-  Star,
-  CheckCircle2,
+  Store as StoreIcon,
+  ChevronsUpDown,
+
+  SlidersHorizontal,
 } from "lucide-react";
 import { Avatar, AvatarFallback } from "./ui/avatar";
 import { Button } from "./ui/button";
 import { Input } from "./ui/input";
 import { useState, useMemo, useEffect, useRef } from "react";
-import {
-  DropdownMenu,
-  DropdownMenuContent,
-  DropdownMenuItem,
-  DropdownMenuTrigger,
-  DropdownMenuSeparator,
-  DropdownMenuLabel,
-} from "./ui/dropdown-menu";
 import { Badge } from "./ui/badge";
-import { useStore } from "../state/store";
+import { useStore, ROLE_RANK, OWNABLE_ROLES } from "../state/store";
 import {
   Dialog,
   DialogContent,
@@ -49,37 +38,45 @@ import {
 } from "./ui/dialog";
 import { Label } from "./ui/label";
 import { toast } from "sonner";
-import { Card, CardContent } from "./ui/card";
-import { canUserAccessStore, verifyUserPassword } from "../../lib/rbac";
+import {
+  canAccessModuleByRole,
+  canUserAccessStore,
+  verifyUserPassword,
+} from "../../lib/rbac";
 import { Onboarding } from "./Onboarding";
+import { Login } from "./Login";
 
 import { Skeleton } from "./ui/skeleton";
+import { motion } from "framer-motion";
 
 // Admin "overview" sidebar: Admin oversees the whole business.
 const adminNavItems = [
   { name: "Dashboard", path: "/", icon: LayoutDashboard },
-  { name: "Stores", path: "/stores", icon: Building2 },
-  { name: "Team", path: "/team", icon: Users },
+  { name: "Transactions", path: "/transactions", icon: Receipt },
   { name: "Insights", path: "/insights", icon: TrendingUp },
-  { name: "Reports", path: "/reports", icon: FileText },
-  { name: "Staff", path: "/staff", icon: Users },
+  { name: "Team", path: "/team", icon: Users },
   { name: "Notifications", path: "/notifications", icon: Bell },
-  { name: "Settings", path: "/settings", icon: Settings },
+  { name: "Settings", path: "/settings", icon: SlidersHorizontal },
 ];
 
 // Operational sidebar: Manager / Cashier, or Admin inside a store.
+//
+// Both roles used to get this list verbatim, which handed a Cashier four links
+// it cannot use: Staff and Team read endpoints that are MANAGER-only (403),
+// Reports reads the store-wide transaction summary (403), and Stores lists all
+// stores (403). The pages loaded empty and their buttons failed on click, so the
+// role could see exactly what it was not allowed to do. Each item is filtered
+// against `navModulesForRole` at render time instead.
 const operationalNavItems = [
   { name: "Dashboard", path: "/", icon: LayoutDashboard },
+  { name: "POS", path: "/pos", icon: CreditCard },
   { name: "Inventory", path: "/inventory", icon: Package },
   { name: "Products", path: "/products", icon: ShoppingCart },
   { name: "Transactions", path: "/transactions", icon: Receipt },
-  { name: "POS", path: "/pos", icon: CreditCard },
   { name: "Insights", path: "/insights", icon: TrendingUp },
   { name: "Forecasts", path: "/forecasts", icon: LineChart },
-  { name: "Reports", path: "/reports", icon: FileText },
-  { name: "Staff", path: "/staff", icon: Users },
   { name: "Notifications", path: "/notifications", icon: Bell },
-  { name: "Settings", path: "/settings", icon: Settings },
+  { name: "Settings", path: "/settings", icon: SlidersHorizontal },
 ];
 
 const allNavItems = [...adminNavItems, ...operationalNavItems];
@@ -92,21 +89,32 @@ export function Layout() {
     allStores, 
     switchStore, 
     theme, 
-    notifications,
-    resetUnreadNotifications,
     users,
     permissions,
     currentUser,
-    adminUser,
+    sessionOwner,
     loginUser,
     logoutUser,
-    switchBackToAdmin,
+    switchBackToOwner,
     currency,
-    inventoryArray,
     formatCurrency,
     adminOverview,
-    setAdminOverview
+    setAdminOverview,
+    status,
+    notificationCounts,
   } = useStore();
+
+  // The feed is paged, so the badge must use the backend's scope-wide unread
+  // count rather than counting the handful of rows currently loaded.
+  const unreadNotifications = notificationCounts?.unread ?? 0;
+
+  // Every route change starts at the top of the scroll container. Without this
+  // a navigation inherited the previous page's scroll offset, so opening a new
+  // section dropped the user halfway down it.
+  const mainRef = useRef<HTMLElement>(null);
+  useEffect(() => {
+    mainRef.current?.scrollTo({ top: 0, left: 0 });
+  }, [location.pathname]);
   
   const [sidebarOpen, setSidebarOpen] = useState(false);
   const [isSelectStoreModalOpen, setIsSelectStoreModalOpen] = useState(false);
@@ -115,54 +123,29 @@ export function Layout() {
   const [pendingStore, setPendingStore] = useState<any>(null);
   const [switchEmail, setSwitchEmail] = useState("");
   const [switchPassword, setSwitchPassword] = useState("");
-  const [isPremiumModalOpen, setIsPremiumModalOpen] = useState(false);
+
   const [storeSelectStep, setStoreSelectStep] = useState<"store" | "role" | "cashier">("store");
   const [selectedSwitchStore, setSelectedSwitchStore] = useState<any>(null);
 
   // Global Search State
-  const [globalSearch, setGlobalSearch] = useState("");
-  const [debouncedSearch, setDebouncedSearch] = useState("");
-  const [isSearching, setIsSearching] = useState(false);
-  const [showSearchResults, setShowSearchResults] = useState(false);
-
-  // Debounce logic
-  useEffect(() => {
-    if (!globalSearch.trim()) {
-      setDebouncedSearch("");
-      setIsSearching(false);
-      return;
-    }
-    
-    setIsSearching(true);
-    const handler = setTimeout(() => {
-      setDebouncedSearch(globalSearch);
-      setIsSearching(false);
-    }, 300);
-
-    return () => clearTimeout(handler);
-  }, [globalSearch]);
-
-  const searchResults = useMemo(() => {
-    if (!debouncedSearch.trim()) return [];
-    return inventoryArray.filter(p => 
-      p.name.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
-      p.sku.toLowerCase().includes(debouncedSearch.toLowerCase()) ||
-      p.category.toLowerCase().includes(debouncedSearch.toLowerCase())
-    ).slice(0, 5);
-  }, [debouncedSearch, inventoryArray]);
-
-  const getStockStatus = (stock: number, reorderPoint: number = 40) => {
-    if (stock < 10) return { label: "Critical", color: "text-red-600 bg-red-50 border-red-100" };
-    if (stock < reorderPoint) return { label: "Low Stock", color: "text-orange-600 bg-orange-50 border-orange-100" };
-    return { label: "Healthy", color: "text-green-600 bg-green-50 border-green-100" };
-  };
-
   const activeUser = currentUser || users[0]; // Fallback to first user if none logged in
-  const unreadCount = notifications.filter(n => !n.read).length;
   const isAdmin = activeUser?.role === "Admin";
   // Admin overview mode: cross-store oversight sidebar. Inside a store the
   // Admin sees the Manager's operational tabs.
   const showAdminOverview = isAdmin && adminOverview;
+
+  // Downward-only impersonation matrix. The session owner (the account that
+  // holds the token) may only act as strictly-lower roles:
+  //   Admin   -> Manager, Cashier
+  //   Manager -> Cashier
+  //   Cashier -> (none)
+  // Anyone who is not the owner is currently an impersonated persona, so the
+  // owner's role decides what they can switch to.
+  const sessionOwnerRole = sessionOwner?.role || activeUser?.role || "Cashier";
+  const ownableRoles = OWNABLE_ROLES[sessionOwnerRole] || [];
+  const isImpersonating = Boolean(
+    sessionOwner && activeUser && activeUser.id !== sessionOwner.id,
+  );
 
   // RBAC: Filter stores available to the user
   const userStores = useMemo(() => {
@@ -179,10 +162,8 @@ export function Layout() {
 
   const switchableStores = useMemo(() => {
     if (isAdmin) {
-      // Admin can only switch into a store that has a Manager appointed.
-      return allStores.filter(
-        (s) => s.id !== "S-ALL" && s.managerId && !s.isAdminStore,
-      );
+      // Admin can enter any of their stores (manager-run or not).
+      return allStores.filter((s) => s.id !== "S-ALL" && !s.isAdminStore);
     }
     return userStores;
   }, [allStores, isAdmin, userStores]);
@@ -190,27 +171,27 @@ export function Layout() {
   // RBAC: Filter nav items based on role + Admin overview vs store context
   const navSource = showAdminOverview ? adminNavItems : operationalNavItems;
   const filteredNavItems = useMemo(() => {
-    return navSource.filter(item => {
-      const permission = permissions[item.name];
-      return permission
-        ? (permission[activeUser?.role || "Cashier"]?.view ?? true)
-        : true;
-    });
-  }, [navSource, activeUser?.role, permissions]);
+    // Page reachability comes from `navModulesForRole`, which mirrors the
+    // backend's per-route `authorize(...)` lists — not from `permissions`.
+    // `permissions` is a user-editable localStorage matrix, so letting it decide
+    // reachability meant the app could advertise a page the API refuses (a
+    // Cashier opening "Staff" against MANAGER-only endpoints) and could also
+    // hide one the API allows (a Manager locked out of "POS"). The matrix still
+    // governs in-page controls via canEdit/canView.
+    return navSource.filter(item =>
+      canAccessModuleByRole(activeUser?.role, item.name),
+    );
+  }, [navSource, activeUser?.role]);
 
   // RBAC: Enforce access control
   useEffect(() => {
     const currentPath = location.pathname;
     const currentItem = allNavItems.find(item => item.path === currentPath || (item.path !== "/" && currentPath.startsWith(item.path)));
     
-    if (currentItem) {
-      const permission = permissions[currentItem.name];
-      if (permission && !(permission[activeUser?.role || "Cashier"]?.view ?? true)) {
-        toast.error("Access denied for your role");
-        navigate("/");
-      }
+    if (currentItem && !canAccessModuleByRole(activeUser?.role, currentItem.name)) {
+      navigate("/", { replace: true });
     }
-  }, [location.pathname, activeUser?.role, permissions, navigate]);
+  }, [location.pathname, activeUser?.role, navigate]);
 
   // Dark Mode Support
   useEffect(() => {
@@ -234,6 +215,13 @@ export function Layout() {
         u.status === "Active" &&
         canUserAccessStore(u, targetStoreId),
     );
+
+    // Downward-only: never allow acting as the session owner or a peer/higher
+    // role (e.g. a Cashier logging in as a Manager, or a Manager as an Admin).
+    if (userForStore && ROLE_RANK[userForStore.role] >= ROLE_RANK[sessionOwnerRole]) {
+      toast.error("You cannot log in as a user with the same or higher privileges.");
+      return;
+    }
 
     if (
       userForStore &&
@@ -261,16 +249,43 @@ export function Layout() {
   };
 
   const handleLogout = () => {
+    // While impersonating a Manager/Cashier, "logout" must not end the
+    // Admin/Manager session. Drop the persona and restore the account that
+    // owns the token (Admin overview, or a Manager's own store).
+    if (isImpersonating) {
+      toast.promise(switchBackToOwner().then(() => navigate("/")), {
+        loading: `Switching back to ${sessionOwner?.role ?? "your account"}...`,
+        success: `Switched back to ${sessionOwner?.role ?? "your account"}`,
+        error: "Could not switch back to your account",
+      });
+      return;
+    }
     toast.promise(new Promise(resolve => setTimeout(resolve, 1000)), {
       loading: "Logging out...",
       success: () => {
         logoutUser();
-        window.location.href = "https://sellsync.store/login";
+        const landingUrl =
+          import.meta.env.VITE_LANDING_URL || "http://localhost:3001";
+        window.location.href = `${landingUrl}/login`;
         return "Logged out successfully";
       },
       error: "Logout failed"
     });
   };
+
+  // Session gate: wait for boot, then ask for a real backend sign-in before
+  // the shell (Offline/local mode is no longer a thing — accounts must be
+  // persisted so Managers/Cashiers can log in on the landing page).
+  if (status === "loading") {
+    return (
+      <div className="min-h-screen w-full flex items-center justify-center bg-gray-50">
+        <div className="h-8 w-8 animate-spin rounded-full border-2 border-indigo-600 border-t-transparent" />
+      </div>
+    );
+  }
+  if (status === "auth") {
+    return <Login />;
+  }
 
   // Onboarding: until a store exists (fresh install or last store deleted),
   // show the setup screen instead of the app shell.
@@ -279,23 +294,62 @@ export function Layout() {
   }
 
   return (
-    <div className={`flex h-screen ${theme === 'dark' ? 'bg-gray-950 text-gray-100' : 'bg-gray-50 text-gray-900'}`}>
+    <div className={`flex h-screen ${theme === 'dark' ? 'bg-gray-950 text-gray-100' : 'bg-surface text-on-surface'}`}>
       {/* Sidebar */}
       <aside
         className={`${
           sidebarOpen ? "translate-x-0" : "-translate-x-full"
-        } fixed lg:translate-x-0 lg:static inset-y-0 left-0 z-50 w-64 ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'} border-r transition-transform duration-300 ease-in-out flex flex-col`}
+        } fixed lg:translate-x-0 lg:static inset-y-0 left-0 z-50 w-[260px] ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-surface-container-lowest border-outline-variant/40'} border-r transition-transform duration-300 ease-in-out flex flex-col`}
       >
         {/* Logo */}
-        <div className={`h-16 flex items-center px-6 border-b ${theme === 'dark' ? 'border-gray-800' : 'border-gray-200'}`}>
+        <div className={`h-16 flex items-center px-6 border-b ${theme === 'dark' ? 'border-gray-800' : 'border-gray-100'}`}>
           <div className="flex items-center gap-2.5 group">
             <img src="/icon.png" alt="SellSync" className="w-10 h-10 rounded-lg object-cover shadow-lg shadow-indigo-100 group-hover:scale-105 transition-transform duration-300" />
             <span className="text-xl font-bold tracking-tight text-[#3B82F6]">SellSync</span>
           </div>
         </div>
 
+        {/* Store Context Card — only in a store-scoped view (Manager/Cashier,
+            or Admin inside a store). Hidden in the Admin cross-store overview,
+            where the Admin is not scoped to a single store. */}
+        {!showAdminOverview && (
+          <div className="px-3 pt-4">
+            <button
+              type="button"
+              onClick={() => setIsSelectStoreModalOpen(true)}
+              className={`w-full flex items-center justify-between gap-3 p-3 rounded-xl border transition-colors text-left group ${
+                theme === 'dark'
+                  ? 'bg-gray-800/60 border-gray-800 hover:bg-gray-800'
+                  : 'bg-surface-container-lowest border-outline-variant/40 shadow-[0_1px_3px_rgba(15,23,42,0.05)] hover:bg-surface-container-low'
+              }`}
+            >
+              <div className="flex items-center gap-3 min-w-0">
+                <div className={`w-9 h-9 rounded-lg flex items-center justify-center shrink-0 ${theme === 'dark' ? 'bg-indigo-900/50' : 'bg-surface-container'}`}>
+                  <StoreIcon className={`w-5 h-5 ${theme === 'dark' ? 'text-indigo-400' : 'text-primary'}`} />
+                </div>
+                <div className="min-w-0 flex flex-col">
+                  <div className="flex items-center gap-1.5">
+                    <span className={`text-sm font-bold truncate leading-none ${theme === 'dark' ? 'text-white' : 'text-on-surface'}`}>
+                      {currentStore.name}
+                    </span>
+                    <span className="flex h-2 w-2 relative shrink-0">
+                      <span className="animate-ping absolute inline-flex h-full w-full rounded-full bg-secondary-fixed-dim opacity-75" />
+                      <span className="relative inline-flex rounded-full h-2 w-2 bg-on-secondary-container" />
+                    </span>
+                  </div>
+                  <span className="text-[11px] text-on-surface-variant font-medium truncate mt-1">
+                    {currentStore.address ||
+                      `${currentStore.city} ${currentStore.state}`}
+                  </span>
+                </div>
+              </div>
+              <ChevronsUpDown className="w-4 h-4 text-on-surface-variant shrink-0" />
+            </button>
+          </div>
+        )}
+
         {/* Navigation */}
-        <nav className="flex-1 px-3 py-4 space-y-1 overflow-y-auto">
+        <nav className="flex-1 px-3 py-4 space-y-1.5 overflow-y-auto">
           {filteredNavItems.map((item) => {
             const isActive =
               location.pathname === item.path ||
@@ -306,42 +360,64 @@ export function Layout() {
                 key={item.path}
                 to={item.path}
                 onClick={() => setSidebarOpen(false)}
-                className={`flex items-center gap-3 px-3 py-2.5 rounded-lg text-sm font-medium transition-colors ${
+                className={`group flex items-center gap-3 px-3.5 py-2.5 rounded-xl text-[15px] font-semibold transition-all ${
                   isActive
-                    ? "bg-indigo-600 text-white"
-                    : theme === 'dark' 
+                    ? "bg-primary-container text-white font-bold shadow-[0_6px_16px_-6px_rgba(79,70,229,0.7)]"
+                    : theme === 'dark'
                       ? "text-gray-400 hover:bg-gray-800 hover:text-white"
-                      : "text-gray-700 hover:bg-gray-100"
+                      : "text-on-surface-variant hover:bg-surface-container-low hover:text-on-surface"
                 }`}
               >
-                <Icon className="w-5 h-5" />
-                {item.name}
+                <Icon className="w-5 h-5 shrink-0" />
+                <span className="flex-1 truncate">{item.name}</span>
+                {item.name === "Notifications" && unreadNotifications > 0 && (
+                  <span
+                    className={`shrink-0 min-w-[20px] h-5 px-1.5 rounded-full text-[10px] font-extrabold flex items-center justify-center ${
+                      isActive
+                        ? "bg-white text-primary-container"
+                        : "bg-primary-container text-white"
+                    }`}
+                  >
+                    {unreadNotifications > 9 ? "9+" : unreadNotifications}
+                  </span>
+                )}
               </Link>
             );
           })}
         </nav>
 
-        {/* Premium Upgrade Box at bottom — Admin only */}
-        {currentUser?.role === "Admin" && (
+        {/* Account + Logout */}
         <div className={`p-4 border-t ${theme === 'dark' ? 'border-gray-800' : 'border-gray-100'}`}>
-          <div 
-            onClick={() => setIsPremiumModalOpen(true)}
-            className="p-4 rounded-xl bg-gradient-to-br from-indigo-600 to-purple-700 text-white shadow-xl shadow-indigo-100 cursor-pointer group hover:scale-[1.02] transition-all duration-300 overflow-hidden relative"
-          >
-            <div className="flex items-center gap-2 mb-1.5 relative z-10">
-              <Star className="w-3.5 h-3.5 text-yellow-300 fill-yellow-300" />
-              <span className="text-[10px] font-black uppercase tracking-widest">Premium</span>
+          <div className="flex items-center gap-3 px-2">
+            <Avatar className="w-9 h-9 border-2 border-indigo-50 shrink-0">
+              {activeUser.profilePicture ? (
+                <img src={activeUser.profilePicture} alt="Avatar" className="w-full h-full object-cover rounded-full" />
+              ) : (
+                <AvatarFallback className="bg-indigo-100 text-indigo-700 font-black text-[10px]">
+                  {activeUser.name.split(' ').map(n => n[0]).join('')}
+                </AvatarFallback>
+              )}
+            </Avatar>
+            <div className="min-w-0 flex-1">
+              <p className={`text-sm font-bold truncate ${theme === 'dark' ? 'text-white' : 'text-on-surface'}`}>{activeUser.name}</p>
+              <p className="text-[10px] text-on-surface-variant font-semibold uppercase tracking-widest truncate">
+                {activeUser.role}
+                {!showAdminOverview ? ` · ${currentStore.name}` : " · All Stores"}
+              </p>
             </div>
-            <p className="text-[10px] text-indigo-100 font-bold leading-tight mb-3 relative z-10">
-              Unlock advanced AI insights & unlimited stores
-            </p>
-            <Button className="w-full h-7 bg-white text-indigo-700 hover:bg-indigo-50 text-[9px] font-black uppercase rounded-lg border-none relative z-10">
-              Upgrade Now
-            </Button>
-            <div className="absolute top-0 right-0 w-24 h-24 bg-white/10 rounded-full -mr-12 -mt-12 blur-2xl" />
+            <button
+              type="button"
+              onClick={handleLogout}
+              aria-label={isImpersonating ? `Switch back to ${sessionOwner?.role ?? "your account"}` : "Logout"}
+              className={`group/logout shrink-0 flex items-center gap-1.5 h-8 px-2 rounded-lg text-red-600 transition-colors ${theme === 'dark' ? 'hover:bg-red-950/30' : 'hover:bg-red-50'}`}
+            >
+              <LogOut className="w-4 h-4" />
+              <span className="max-w-0 overflow-hidden whitespace-nowrap text-xs font-semibold opacity-0 group-hover/logout:max-w-[3.5rem] group-hover/logout:opacity-100 transition-all duration-200">
+                {isImpersonating ? "Back" : "Logout"}
+              </span>
+            </button>
           </div>
         </div>
-        )}
       </aside>
 
       {/* Overlay for mobile */}
@@ -354,219 +430,12 @@ export function Layout() {
 
       {/* Main Content */}
       <div className="flex-1 flex flex-col min-w-0 overflow-hidden">
-        {/* Header */}
-        <header className={`h-16 ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-white border-gray-200'} border-b flex items-center px-4 lg:px-6 gap-4`}>
-          <Button
-            variant="ghost"
-            size="icon"
-            className="lg:hidden"
-            onClick={() => setSidebarOpen(!sidebarOpen)}
-          >
-            <Menu className="w-5 h-5" />
-          </Button>
-
-          {/* Search — hidden for admin */}
-          {!isAdmin && (
-          <div className="flex-1 max-w-md mx-auto relative">
-            <div className="relative">
-              {isSearching ? (
-                <RefreshCcw className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-indigo-600 animate-spin" />
-              ) : (
-                <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
-              )}
-              <Input
-                type="search"
-                placeholder="Search inventory, SKUs, categories..."
-                value={globalSearch}
-                onChange={(e) => {
-                  setGlobalSearch(e.target.value);
-                  setShowSearchResults(true);
-                }}
-                onFocus={() => setShowSearchResults(true)}
-                onKeyDown={(e) => {
-                  if (e.key === 'Escape') setShowSearchResults(false);
-                }}
-                className={`pl-9 border-none h-10 rounded-xl transition-all ${theme === 'dark' ? 'bg-gray-800 text-white focus:bg-gray-700' : 'bg-gray-50 text-gray-900 focus:bg-white focus:ring-2 focus:ring-indigo-100'}`}
-              />
-            </div>
-
-            {/* Global Search Results Dropdown */}
-            {showSearchResults && globalSearch.trim() && (
-              <>
-                <div 
-                  className="fixed inset-0 z-10" 
-                  onClick={() => setShowSearchResults(false)} 
-                />
-                <Card className={`absolute top-full left-0 right-0 mt-2 z-20 border-none shadow-2xl rounded-2xl overflow-hidden animate-in fade-in slide-in-from-top-2 duration-200 ${theme === 'dark' ? 'bg-gray-800' : 'bg-white'}`}>
-                  <CardContent className="p-2">
-                    {searchResults.length > 0 ? (
-                      <div className="space-y-1">
-                        {searchResults.map((p) => {
-                          const status = getStockStatus(p.stock, p.reorderPoint);
-                          return (
-                            <button
-                              key={p.id}
-                              className={`w-full flex items-center gap-3 p-2 rounded-xl transition-colors text-left ${theme === 'dark' ? 'hover:bg-gray-700' : 'hover:bg-gray-50'}`}
-                              onClick={() => {
-                                navigate("/inventory", { state: { search: p.name, highlightId: p.id } });
-                                setShowSearchResults(false);
-                                setGlobalSearch("");
-                              }}
-                            >
-                              <div className="w-12 h-12 bg-indigo-50 rounded-xl flex items-center justify-center shrink-0 border border-indigo-100/50">
-                                <span className="text-indigo-600 font-black text-lg">{p.name[0]}</span>
-                              </div>
-                              <div className="flex-1 min-w-0">
-                                <div className="flex items-center justify-between gap-2">
-                                  <p className="font-bold text-sm truncate text-gray-900 dark:text-white">{p.name}</p>
-                                  <span className="text-xs font-black text-indigo-600 shrink-0">{formatCurrency(p.price)}</span>
-                                </div>
-                                <div className="flex items-center gap-2 mt-0.5">
-                                  <span className="text-[10px] font-bold text-gray-400 uppercase tracking-tighter">SKU: {p.sku}</span>
-                                  <span className="text-[10px] text-gray-300">•</span>
-                                  <span className="text-[10px] font-bold text-gray-400">{p.category}</span>
-                                </div>
-                                <div className="flex items-center gap-2 mt-1">
-                                  <Badge className={`text-[9px] px-1.5 h-4 font-black uppercase tracking-tighter border-none ${status.color}`}>
-                                    {status.label}
-                                  </Badge>
-                                  <span className="text-[10px] font-bold text-gray-500">{p.stock} units left</span>
-                                </div>
-                              </div>
-                            </button>
-                          );
-                        })}
-                        <div className="pt-1 mt-1 border-t border-gray-100 dark:border-gray-700">
-                          <Button 
-                            variant="ghost" 
-                            className="w-full justify-center text-xs font-black uppercase tracking-widest text-indigo-600 h-10 hover:bg-indigo-50"
-                            onClick={() => {
-                              navigate("/inventory", { state: { search: globalSearch } });
-                              setShowSearchResults(false);
-                              setGlobalSearch("");
-                            }}
-                          >
-                            View all results for "{globalSearch}"
-                          </Button>
-                        </div>
-                      </div>
-                    ) : !isSearching && (
-                      <div className="p-8 text-center">
-                        <div className="w-12 h-12 bg-gray-50 rounded-2xl flex items-center justify-center mx-auto mb-3">
-                          <Search className="w-6 h-6 text-gray-300" />
-                        </div>
-                        <p className="text-sm font-bold text-gray-900">No products found</p>
-                        <p className="text-xs text-gray-500 mt-1">Try a different search term or SKU</p>
-                      </div>
-                    )}
-                  </CardContent>
-                </Card>
-              </>
-            )}
-          </div>
-          )}
-
-          {/* Right side */}
-          <div className={`flex items-center gap-3 ${isAdmin ? 'ml-auto pr-5' : ''}`}>
-            {/* Notification Bell */}
-            <Button 
-              variant="ghost" 
-              size="icon" 
-              className="relative hover:bg-indigo-50 hover:text-indigo-600 rounded-xl"
-              onClick={() => {
-                resetUnreadNotifications();
-                navigate("/notifications");
-              }}
-            >
-              <Bell className="w-5 h-5" />
-              {unreadCount > 0 && (
-                <Badge className="absolute -top-1 -right-1 w-5 h-5 flex items-center justify-center p-0 bg-red-500 text-white border-2 border-white text-[10px] font-bold">
-                  {unreadCount}
-                </Badge>
-              )}
-            </Button>
-
-            {/* User Avatar Dropdown */}
-            <DropdownMenu>
-              <DropdownMenuTrigger asChild>
-                <Button variant="ghost" className={`flex items-center gap-3 px-3 h-10 rounded-xl transition-all ${theme === 'dark' ? 'hover:bg-gray-800' : 'hover:bg-gray-100'}`}>
-                  <Avatar className="w-8 h-8 border-2 border-indigo-50">
-                    {activeUser.profilePicture ? (
-                      <img src={activeUser.profilePicture} alt="Avatar" className="w-full h-full object-cover rounded-full" />
-                    ) : (
-                      <AvatarFallback className="bg-indigo-100 text-indigo-700 font-black text-[10px]">
-                        {activeUser.name.split(' ').map(n => n[0]).join('')}
-                      </AvatarFallback>
-                    )}
-                  </Avatar>
-                  <div className="hidden sm:flex flex-col items-start text-left mr-1">
-                    <p className="text-xs font-black leading-none">{activeUser.name}</p>
-                    <p className="text-[9px] text-gray-400 font-bold uppercase tracking-widest mt-1">{showAdminOverview ? "All Stores" : currentStore.name}</p>
-                  </div>
-                  <ChevronDown className="w-3.5 h-3.5 text-gray-400" />
-                </Button>
-              </DropdownMenuTrigger>
-              <DropdownMenuContent align="end" className="w-64 p-2 rounded-2xl shadow-2xl border-none">
-                <DropdownMenuLabel className="px-3 py-3 border-b border-gray-50 mb-1">
-                  <p className="text-sm font-black">{activeUser.name}</p>
-                  <p className="text-[10px] text-gray-500 font-medium truncate">{activeUser.email}</p>
-                  <Badge variant="outline" className="mt-2 text-[9px] font-black uppercase tracking-widest bg-indigo-50 text-indigo-700 border-indigo-100 px-2 py-0.5">
-                    {activeUser.role}
-                  </Badge>
-                </DropdownMenuLabel>
-                <DropdownMenuItem 
-                  className="rounded-xl px-3 py-2.5 cursor-pointer font-bold text-xs"
-                  onClick={() => navigate("/settings")}
-                >
-                  <Settings className="w-4 h-4 mr-3 text-gray-400" />
-                  Settings
-                </DropdownMenuItem>
-                {isAdmin && !showAdminOverview && (
-                  <DropdownMenuItem 
-                    className="rounded-xl px-3 py-2.5 cursor-pointer font-bold text-xs"
-                    onClick={() => {
-                      setAdminOverview(true);
-                      navigate("/");
-                    }}
-                  >
-                    <LayoutDashboard className="w-4 h-4 mr-3 text-indigo-600" />
-                    Back to Store Overview
-                  </DropdownMenuItem>
-                )}
-                {adminUser && activeUser?.role !== "Admin" && (
-                  <DropdownMenuItem 
-                    className="rounded-xl px-3 py-2.5 cursor-pointer font-bold text-xs"
-                    onClick={() => {
-                      switchBackToAdmin();
-                      navigate("/");
-                    }}
-                  >
-                    <LayoutDashboard className="w-4 h-4 mr-3 text-indigo-600" />
-                    Switch Back to Admin
-                  </DropdownMenuItem>
-                )}
-                <DropdownMenuItem 
-                  className="rounded-xl px-3 py-2.5 cursor-pointer font-bold text-xs"
-                  onClick={() => setIsSelectStoreModalOpen(true)}
-                >
-                  <Building2 className="w-4 h-4 mr-3 text-indigo-600" />
-                  Change Store
-                </DropdownMenuItem>
-                <DropdownMenuSeparator className="my-1 bg-gray-50" />
-                <DropdownMenuItem 
-                  className="rounded-xl px-3 py-2.5 cursor-pointer font-bold text-xs text-red-600 hover:text-red-700 hover:bg-red-50"
-                  onClick={handleLogout}
-                >
-                  <LogOut className="w-4 h-4 mr-3" />
-                  Logout
-                </DropdownMenuItem>
-              </DropdownMenuContent>
-            </DropdownMenu>
-          </div>
-        </header>
-
         {/* Main View Area */}
-        <main className="flex-1 overflow-y-auto pb-20 lg:pb-0">
+        <main
+          ref={mainRef}
+          style={{ overscrollBehaviorY: "none" }}
+          className="flex-1 overflow-y-auto pb-20 lg:pb-0"
+        >
           <ErrorBoundary>
             {isSwitchingLoading ? (
               <div className="p-8 space-y-8">
@@ -586,7 +455,14 @@ export function Layout() {
                 </div>
               </div>
             ) : (
-              <Outlet />
+              <motion.div
+                key={location.pathname}
+                initial={{ opacity: 0 }}
+                animate={{ opacity: 1 }}
+                transition={{ duration: 0.5, ease: [0.22, 1, 0.36, 1] }}
+              >
+                <Outlet />
+              </motion.div>
             )}
           </ErrorBoundary>
           <Toaster />
@@ -610,51 +486,20 @@ export function Layout() {
               </Link>
             );
           })}
+          <button
+            type="button"
+            onClick={() => setSidebarOpen(true)}
+            className="flex flex-col items-center gap-1 p-2 rounded-xl transition-all text-gray-400"
+          >
+            <div className="p-1.5 rounded-lg">
+              <Menu className="w-5 h-5" />
+            </div>
+            <span className="text-[10px] font-black uppercase tracking-tighter">Menu</span>
+          </button>
         </nav>
       </div>
 
-      {/* Premium Upgrade Modal */}
-      <Dialog open={isPremiumModalOpen} onOpenChange={setIsPremiumModalOpen}>
-        <DialogContent className="sm:max-w-[500px] rounded-[2.5rem] p-0 overflow-hidden border-none shadow-2xl bg-white">
-          <div className="bg-indigo-600 p-10 text-white relative overflow-hidden">
-            <div className="relative z-10">
-              <div className="w-12 h-12 bg-white/20 rounded-2xl flex items-center justify-center mb-6">
-                <Star className="w-6 h-6 text-yellow-300 fill-yellow-300" />
-              </div>
-              <h2 className="text-3xl font-black tracking-tight mb-2">Upgrade to Premium</h2>
-              <p className="text-indigo-100 font-medium">Take your retail business to the next level with advanced intelligence.</p>
-            </div>
-            <div className="absolute top-0 right-0 w-64 h-64 bg-white/10 rounded-full -mr-32 -mt-32 blur-3xl" />
-          </div>
-          
-          <div className="p-10 space-y-6">
-            <div className="space-y-4">
-              {[
-                "Unlimited stores and unlimited products",
-                "Advanced AI predictive sales forecasting",
-                "Multi-user RBAC with custom permissions",
-                "Priority 24/7 expert support",
-                "Bulk data exports and custom API access",
-                "White-label receipt branding"
-              ].map((feature, i) => (
-                <div key={i} className="flex items-center gap-3">
-                  <div className="w-5 h-5 bg-green-50 rounded-full flex items-center justify-center">
-                    <CheckCircle2 className="w-3 h-3 text-green-600" />
-                  </div>
-                  <span className="text-sm font-bold text-gray-700">{feature}</span>
-                </div>
-              ))}
-            </div>
-            
-            <Button
-              className="w-full h-14 bg-indigo-600 hover:bg-indigo-700 text-white rounded-2xl font-black text-lg shadow-xl shadow-indigo-100 mt-4"
-              onClick={() => window.open("https://payment.sellsync.store/", "_blank", "noopener,noreferrer")}
-            >
-              Continue to Upgrade →
-            </Button>
-          </div>
-        </DialogContent>
-      </Dialog>
+
 
       {/* Store Selection Modal */}
       <Dialog open={isSelectStoreModalOpen} onOpenChange={(open) => { setIsSelectStoreModalOpen(open); if (!open) { setStoreSelectStep("store"); setSelectedSwitchStore(null); } }}>
@@ -682,6 +527,15 @@ export function Layout() {
                         disabled={isCurrent}
                         onClick={() => {
                           setSelectedSwitchStore(store);
+                          // A Cashier owns no lower roles, so there is nothing
+                          // to impersonate — just switch the store context.
+                          if (ownableRoles.length === 0) {
+                            setIsSelectStoreModalOpen(false);
+                            setSelectedSwitchStore(null);
+                            switchStore(store.id);
+                            navigate("/");
+                            return;
+                          }
                           setStoreSelectStep("role");
                         }}
                         className={`rounded-2xl border transition-all p-4 flex items-center justify-between text-left ${
@@ -716,13 +570,13 @@ export function Layout() {
               </div>
 
               <div className="p-6 bg-gray-50/50 border-t border-gray-50 space-y-2">
-                {adminUser && !isAdmin && (
+                {isImpersonating && (
                   <Button 
                     className="w-full h-12 rounded-xl font-bold bg-indigo-600 hover:bg-indigo-700 text-white shadow-lg shadow-indigo-100"
-                    onClick={() => { switchBackToAdmin(); setIsSelectStoreModalOpen(false); navigate("/"); }}
+                    onClick={() => { switchBackToOwner(); setIsSelectStoreModalOpen(false); navigate("/"); }}
                   >
                     <LayoutDashboard className="w-4 h-4 mr-2" />
-                    Switch Back to Admin
+                    Switch Back to {sessionOwner?.role}
                   </Button>
                 )}
                 {isAdmin && !showAdminOverview && (
@@ -758,6 +612,7 @@ export function Layout() {
               </div>
               
               <div className="p-6 space-y-3">
+                {ownableRoles.includes("Manager") && (
                 <button
                   type="button"
                   onClick={() => {
@@ -765,7 +620,12 @@ export function Layout() {
                       const targetStore = selectedSwitchStore;
                       const manager = users.find((u) => u.id === targetStore.managerId);
                       if (!manager) {
-                        toast.error("Manager not found for this store");
+                        // No Manager assigned yet — open the friendly assign
+                        // flow on the Stores page instead of dead-ending.
+                        setIsSelectStoreModalOpen(false);
+                        setStoreSelectStep("store");
+                        setSelectedSwitchStore(null);
+                        navigate("/stores");
                         return;
                       }
                       setPendingStore(targetStore);
@@ -808,7 +668,9 @@ export function Layout() {
                   </div>
                   <ChevronRight className="w-4 h-4 text-blue-300 group-hover:text-blue-600 group-hover:translate-x-1 transition-all shrink-0" />
                 </button>
+                )}
 
+                {ownableRoles.includes("Cashier") && (
                 <button
                   type="button"
                   onClick={() => setStoreSelectStep("cashier")}
@@ -828,6 +690,7 @@ export function Layout() {
                   </div>
                   <ChevronRight className="w-4 h-4 text-gray-300 group-hover:text-indigo-600 group-hover:translate-x-1 transition-all shrink-0" />
                 </button>
+                )}
               </div>
             </>
           )}

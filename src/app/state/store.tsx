@@ -41,18 +41,47 @@ import {
   canEditModule,
   canViewModule,
 } from "../../lib/rbac";
+import { consumeHandoffCookie } from "../../lib/externalAuth";
+import { toast } from "sonner";
+import {
+  db,
+  clearToken,
+  getToken,
+  hasToken,
+  mapNotification,
+  SESSION_EXPIRED_EVENT,
+  mapProduct,
+  mapRole,
+  mapStore,
+  mapTerminal,
+  mapTransaction,
+  mapUser,
+  type DbNotification,
+  type DbProduct,
+  type DbStore,
+  type DbTerminal,
+  type DbTransaction,
+  type DbUser,
+  type DbCashierKpis,
+} from "../../lib/db";
 
 export type Product = {
-  id: number;
+  id: string;
   name: string;
   sku: string;
   barcode?: string;
   category: string;
   price: number;
-  costPrice?: number;
+  costPrice?: string;
   supplier?: string;
   manufacturedDate?: string;
   expiryDate?: string;
+  // Product photo URL fetched from an image API when the product is created.
+  imageUrl?: string;
+  // Server truth: a deactivated product is not sellable (the sale API refuses
+  // it). `undefined` means active, so local/mock products that never set it
+  // keep working.
+  isActive?: boolean;
 };
 
 export type InventoryItem = Product & {
@@ -63,12 +92,27 @@ export type InventoryItem = Product & {
 };
 
 export type CartItem = {
-  productId: number;
+  productId: string;
   qty: number;
   price: number;
 };
 
 export type Role = "Admin" | "Manager" | "Cashier";
+
+// Used to enforce downward-only impersonation: an account may only act as a
+// strictly-lower role (Admin -> Manager/Cashier, Manager -> Cashier). A
+// Cashier cannot act as anyone else.
+export const ROLE_RANK: Record<Role, number> = {
+  Admin: 3,
+  Manager: 2,
+  Cashier: 1,
+};
+
+export const OWNABLE_ROLES: Record<Role, Role[]> = {
+  Admin: ["Manager", "Cashier"],
+  Manager: ["Cashier"],
+  Cashier: [],
+};
 
 export type Currency = {
   id: string;
@@ -232,6 +276,13 @@ export type AppNotification = {
   message: string;
   timestamp: string;
   read: boolean;
+  // Which store the notice belongs to. An Admin sees every store at once, so
+  // the Notifications page uses this to label each card with its shop. Null for
+  // older rows written before the feed carried a store.
+  storeId?: string | null;
+  // A stock alert (low/out of stock, expiry) can be acknowledged from the
+  // Notifications page, which moves it out of the Alerts tab into Resolved.
+  resolved?: boolean;
   productId?: number;
   link?: string;
   actionId?: string;
@@ -269,20 +320,33 @@ export type PendingApproval = {
 };
 
 export type KPIs = {
-  totalRevenueToday: number;
-  totalRevenueTodayChange: number;
-  totalSalesToday: number;
-  totalSalesTodayChange: number;
-  productsSoldToday: number;
-  productsSoldTodayChange: number;
+  windowHours: number;
+  totalRevenue24h: number;
+  totalRevenue24hChange: number;
+  totalSales24h: number;
+  totalSales24hChange: number;
+  productsSold24h: number;
+  productsSold24hChange: number;
   lowStockCount: number;
   lowStockCountChange: number;
-  todayRefunds: number;
+  /** Active lines expiring within the 30-day warning window. */
+  expiringSoonCount: number;
+  /** Active lines already past their expiry date. */
+  expiredCount: number;
 };
 
 export type SalesTrendPoint = {
   day: string;
   sales: number;
+};
+
+/** Server-computed dashboard data for a single store. */
+export type StoreAnalytics = {
+  kpis: KPIs;
+  trend: { date: string; revenue: number }[];
+  topProducts: { productName: string; unitsSold: number }[];
+  salesByCategory: { category: string; revenue: number }[];
+  hourlySales: { hour: string; revenue: number }[];
 };
 
 export type TopProduct = {
@@ -312,6 +376,7 @@ export type BankAccount = {
 
 export type POSTerminal = {
   id: string;
+  storeId?: string;
   name: string;
   provider:
     | "Paystack"
@@ -385,13 +450,36 @@ export type ReceiptDefaults = {
 };
 
 type StoreState = {
-  inventory: Record<number, InventoryItem>;
+  inventory: Record<string, InventoryItem>;
   transactions: Transaction[];
   notifications: AppNotification[];
+  // Server-side page state for the notification table. `notificationTotal` is
+  // the filtered row count for the current tab/search (drives the pager), and
+  // `notificationCounts` is the scope-wide KPI totals from the backend.
+  notificationTotal: number;
+  notificationCounts: {
+    total: number;
+    unread: number;
+    alerts: number;
+    resolved: number;
+  };
   customers: Customer[];
   terminals: { id: string; name: string; type: "pos" | "linkedAccount" }[];
-  categories: string[];
-  dailySales: Record<number, number>;
+  categoriesByStore: Record<string, string[]>;
+  dailySales: Record<string, number>;
+  /**
+   * Dashboard figures computed by the backend and keyed by store id.
+   *
+   * The dashboard used to re-derive revenue, sale counts and low-stock counts
+   * in the browser from `state.transactions` / `state.inventory`. That only ever
+   * saw the rows the browser happened to be holding, so a live till could sit at
+   * zero on every figure while the database had the sales in it, and low stock
+   * never matched the catalogue. The API answers the same questions with a
+   * single aggregate query, and it applies the caller's own sales scope for a
+   * Cashier. Absent for a store means "not loaded yet" — callers fall back to
+   * the local derivation rather than showing a hard zero.
+   */
+  analyticsByStore: Record<string, StoreAnalytics>;
   users: User[];
   currentStore: Store | null;
   allStores: Store[];
@@ -400,9 +488,12 @@ type StoreState = {
   theme: "light" | "dark";
   currency: Currency;
   currentUser: User | null;
-  // Snapshot of the Admin account. Kept so an Admin who enters a store as a
-  // Manager/Cashier can switch back to their Admin session (all-stores view).
-  adminUser: User | null;
+  // Session owner = the account that actually holds the session token (the
+  // person signed in on the Login / landing page). Everyone else in state is
+  // accessed only as a downward impersonation. Kept so the owner can switch
+  // straight back to their own screen (Admin overview, or a Manager's screen
+  // after logging in as one of their Cashiers).
+  sessionOwner: User | null;
   // Admin "overview" mode: Admin oversees all stores (cross-store data,
   // admin sidebar with Stores/Team tabs). When false, the Admin is inside a
   // specific store and gets the Manager's operational tabs.
@@ -446,7 +537,7 @@ type Action =
   | { type: "SET_PRICE"; productId: number; price: number }
   | {
       type: "ADD_PRODUCT";
-      product: Omit<InventoryItem, "id">;
+      product: Omit<InventoryItem, "id"> & { id?: string };
     }
   | {
       type: "SET_STOCK";
@@ -464,13 +555,16 @@ type Action =
   | {
       type: "ADD_CATEGORY";
       name: string;
+      storeId: string;
     }
   | {
       type: "DELETE_CATEGORY";
       name: string;
+      storeId: string;
     }
-  | { type: "SET_DAILY_SALES"; payload: Record<number, number> }
+  | { type: "SET_DAILY_SALES"; payload: Record<string, number> }
   | { type: "MARK_NOTIFICATION_READ"; id: string }
+  | { type: "RESOLVE_NOTIFICATION"; id: string }
   | { type: "MARK_ALL_NOTIFICATIONS_READ" }
   | { type: "CLEAR_ALL_NOTIFICATIONS" }
   | { type: "ADD_USER"; user: User }
@@ -483,8 +577,20 @@ type Action =
   | { type: "LOGOUT_USER" }
   | { type: "SET_ADMIN_OVERVIEW"; value: boolean }
   | { type: "SET_CURRENCY"; currency: Currency }
+  | { type: "SET_THEME"; theme: "light" | "dark" }
   | { type: "UPDATE_STORE_PROFILE"; store: Store }
   | { type: "RESET_UNREAD_NOTIFICATIONS" }
+  | {
+      type: "REPLACE_NOTIFICATIONS";
+      notifications: AppNotification[];
+      total: number;
+      counts: {
+        total: number;
+        unread: number;
+        alerts: number;
+        resolved: number;
+      };
+    }
   | { type: "UPDATE_PERMISSIONS"; permissions: PermissionMatrix }
   | { type: "UPDATE_PREFERENCES"; preferences: Preferences }
   | { type: "ADD_BANK_ACCOUNT"; account: BankAccount }
@@ -517,7 +623,57 @@ type Action =
   | { type: "REJECT_LINK_REQUEST"; requestId: string; reason: string }
   | { type: "SUBMIT_APPROVAL_REQUEST"; request: PendingApproval }
   | { type: "APPROVE_APPROVAL_REQUEST"; requestId: string }
-  | { type: "REJECT_APPROVAL_REQUEST"; requestId: string; reason?: string };
+  | { type: "REJECT_APPROVAL_REQUEST"; requestId: string; reason?: string }
+  | {
+      type: "REPLACE_STORE_CATEGORIES";
+      storeId: string;
+      categories: string[];
+    }
+  | {
+      type: "REPLACE_STORE_PRODUCTS";
+      storeId: string;
+      products: InventoryItem[];
+    }
+  | {
+      type: "REPLACE_STORE_ANALYTICS";
+      storeId: string;
+      analytics: StoreAnalytics;
+    }
+  | {
+      type: "REPLACE_STORE_INSIGHT";
+      storeId: string;
+      insight: DbStoreInsight | null;
+    }
+  | {
+      type: "REPLACE_STORE_TRANSACTIONS";
+      storeId: string;
+      transactions: Transaction[];
+    }
+  | {
+      type: "HYDRATE_DB";
+      payload: {
+        me: DbUser;
+        stores: DbStore[];
+        byStore: Record<
+          string,
+          {
+            products: DbProduct[];
+            transactions: DbTransaction[];
+            cashiers: DbUser[];
+            terminals: DbTerminal[];
+          }
+        >;
+        notifications: DbNotification[];
+        notificationTotal: number;
+        notificationCounts: {
+          total: number;
+          unread: number;
+          alerts: number;
+          resolved: number;
+        };
+      };
+    }
+  | { type: "HYDRATE_EXTERNAL_LOGIN"; user: User; store: Store };
 
 const initialInventory: InventoryItem[] = [];
 
@@ -546,13 +702,19 @@ const initialPermissions: PermissionMatrix = {
   },
   POS: {
     Admin: { view: true, edit: true },
-    Manager: { view: false, edit: false },
+    // Managers can work the till: `POST /transactions/create` authorises them and
+    // resolves their assigned or owned store. This row said false, which is what
+    // kept the POS out of a Manager's sidebar after the API was opened up to them.
+    Manager: { view: true, edit: true },
     Cashier: { view: true, edit: true },
   },
   Insights: {
     Admin: { view: true, edit: true },
     Manager: { view: true, edit: false },
-    Cashier: { view: false, edit: false },
+    // A Cashier gets insights over its own sales only, which is what the
+    // backend serves it. Row said false, hiding the page from the one role the
+    // "your till" scope was built for.
+    Cashier: { view: true, edit: false },
   },
   Forecasts: {
     Admin: { view: true, edit: true },
@@ -567,7 +729,11 @@ const initialPermissions: PermissionMatrix = {
   Staff: {
     Admin: { view: true, edit: true },
     Manager: { view: true, edit: false },
-    Cashier: { view: true, edit: false },
+    // Every Staff endpoint (`/users/:storeId`, `/cashiers/:storeId`, create,
+    // deactivate, reactivate) is MANAGER-only, so a Cashier opening this page
+    // got an empty list and 403s on every button. Page reachability is enforced
+    // by `navModulesForRole`; this row just keeps the page honest.
+    Cashier: { view: false, edit: false },
   },
   // Admin-only modules shown on the Admin overview sidebar
   Stores: {
@@ -597,7 +763,7 @@ const initialPermissions: PermissionMatrix = {
 // Bump STORAGE_VERSION to wipe legacy/demo localStorage on the next launch.
 // Fresh production installs ship completely empty and start from onboarding.
 // =============================================================================
-const STORAGE_VERSION = "empty-2026.09.10-v2";
+const STORAGE_VERSION = "dbauth-2026.09.22-v3";
 if (localStorage.getItem("sellsync_storage_version") !== STORAGE_VERSION) {
   Object.keys(localStorage)
     .filter((k) => k.startsWith("sellsync_"))
@@ -622,16 +788,18 @@ const initialState: StoreState = {
   notifications: JSON.parse(
     localStorage.getItem("sellsync_notifications") || "null",
   ) || [],
+  notificationTotal: 0,
+  notificationCounts: { total: 0, unread: 0, alerts: 0, resolved: 0 },
   customers: [],
   terminals: [
     { id: "T-01", name: "Register 1", type: "pos" },
     { id: "T-02", name: "Register 2", type: "pos" },
     { id: "T-03", name: "Mobile App", type: "linkedAccount" },
   ],
-  categories: JSON.parse(
-    localStorage.getItem("sellsync_categories") || "null",
-  ) || [],
+  categoriesByStore: {},
   dailySales: {},
+  analyticsByStore: {},
+  insightsByStore: {},
   users: (() => {
     const raw = JSON.parse(localStorage.getItem("sellsync_users") || "null");
     if (raw) {
@@ -700,7 +868,9 @@ const initialState: StoreState = {
       receipts: { ...defaults.receipts, ...(saved.receipts || {}) },
     };
   })() as Preferences,
-  theme: "light",
+  theme:
+    (localStorage.getItem("sellsync_theme") as "light" | "dark" | null) ||
+    "light",
   currency: JSON.parse(
     localStorage.getItem("sellsync_currency") ||
       '{"id":"NGN","name":"Nigerian Naira","symbol":"₦"}',
@@ -713,14 +883,10 @@ const initialState: StoreState = {
     }
     return null;
   })(),
-  adminUser: (() => {
-    const saved = JSON.parse(
-      localStorage.getItem("sellsync_admin_user") || "null",
-    );
-    if (saved) return saved;
-    const u = JSON.parse(localStorage.getItem("sellsync_user") || "null");
-    return u && u.role === "Admin" ? u : null;
-  })(),
+  // The session owner is ALWAYS derived from the backend session (see
+  // HYDRATE_DB) — never seeded from localStorage, so a stale Admin snapshot
+  // can never leak into a Manager/Cashier session.
+  sessionOwner: null,
   adminOverview: (() => {
     const u = JSON.parse(localStorage.getItem("sellsync_user") || "null");
     if (!u || u.role !== "Admin") return false;
@@ -849,17 +1015,18 @@ function cascadeDeleteStore(state: StoreState, storeId: string): StoreState {
 function reducer(state: StoreState, action: Action): StoreState {
   switch (action.type) {
     case "COMPLETE_SALE": {
-      // BACKEND_INTEGRATION: Add API call to save transaction:
-      // try {
-      //   const response = await fetch(`${import.meta.env.VITE_API_BASE_URL}/link/transactions`, {
-      //     method: "POST",
-      //     headers: { "Content-Type": "application/json" },
-      //     body: JSON.stringify(action.payload),
-      //   });
-      //   if (!response.ok) throw new Error("Failed to save transaction");
-      // } catch (error) {
-      //   console.error("API Error saving transaction:", error);
-      // }
+      // Notifications are NOT synthesised here.
+      //
+      // The reducer used to unshift a "Low Stock Alert" (and a "Sales
+      // Milestone" every 10th sale) into local state. Both were invented in
+      // the browser: they were never written to the database, so they vanished
+      // on refresh, never reached the manager on another device, and the
+      // low-stock one duplicated the alert the backend really does persist.
+      // The backend now records the sale and any low-stock condition, and
+      // `refreshNotifications` pulls the authoritative feed after checkout.
+      //
+      // Local stock and the sales list are still updated optimistically below
+      // so the UI responds instantly; the backend refetch reconciles them.
 
       const {
         transactionId,
@@ -876,7 +1043,6 @@ function reducer(state: StoreState, action: Action): StoreState {
         notes,
       } = action.payload;
       const newInventory = { ...state.inventory };
-      const newNotifications: AppNotification[] = [...state.notifications];
 
       for (const item of items) {
         const inv = newInventory[item.productId];
@@ -886,20 +1052,6 @@ function reducer(state: StoreState, action: Action): StoreState {
             ...inv,
             stock: newStock,
           };
-
-          // Trigger Low Stock Notification
-          if (newStock <= inv.reorderPoint) {
-            newNotifications.unshift({
-              id: `NTF-${Date.now()}-${item.productId}`,
-              type: "alert",
-              title: "Low Stock Alert",
-              message: `${inv.name} stock is critically low (${newStock} units remaining)`,
-              timestamp: new Date().toISOString(),
-              read: false,
-              productId: item.productId,
-              link: "/forecasts",
-            });
-          }
         }
       }
       const now = new Date();
@@ -921,12 +1073,6 @@ function reducer(state: StoreState, action: Action): StoreState {
         notes,
       };
 
-      // Sales Milestone Trigger (Example: every 10th sale today)
-      const today = now.toISOString().slice(0, 10);
-      const todaySalesCount =
-        state.transactions.filter((t) => t.datetime.startsWith(today)).length +
-        1;
-
       // Update daily sales tracking
       const newDailySales = { ...state.dailySales };
       for (const item of items) {
@@ -934,23 +1080,11 @@ function reducer(state: StoreState, action: Action): StoreState {
           (newDailySales[item.productId] || 0) + item.qty;
       }
 
-      if (todaySalesCount % 10 === 0) {
-        newNotifications.unshift({
-          id: `NTF-MS-${Date.now()}`,
-          type: "info",
-          title: "Sales Milestone",
-          message: `Congratulations! You've reached ${todaySalesCount} sales today`,
-          timestamp: now.toISOString(),
-          read: false,
-          link: "/reports",
-        });
-      }
-
       return {
         ...state,
         inventory: newInventory,
         transactions: [tx, ...state.transactions],
-        notifications: newNotifications,
+        notifications: state.notifications,
         dailySales: newDailySales,
       };
     }
@@ -1044,8 +1178,6 @@ function reducer(state: StoreState, action: Action): StoreState {
       };
     }
     case "ADD_PRODUCT": {
-      const nextId =
-        Math.max(0, ...Object.keys(state.inventory).map((k) => Number(k))) + 1;
       const storeId = action.product.storeId || state.currentStore?.id || "";
 
       // Ensure product is assigned to a valid store (no global overview store)
@@ -1053,10 +1185,13 @@ function reducer(state: StoreState, action: Action): StoreState {
         return state;
       }
 
-      const item: InventoryItem = { ...action.product, id: nextId, storeId };
+      // Keep the backend-generated id when the product was persisted to the
+      // DB; otherwise fall back to a fresh UUID for offline/local mode.
+      const id = action.product.id || crypto.randomUUID();
+      const item: InventoryItem = { ...action.product, id, storeId };
       return {
         ...state,
-        inventory: { ...state.inventory, [nextId]: item },
+        inventory: { ...state.inventory, [id]: item },
       };
     }
     case "UPDATE_PRODUCT": {
@@ -1108,23 +1243,48 @@ function reducer(state: StoreState, action: Action): StoreState {
       };
     }
     case "MARK_NOTIFICATION_READ": {
+      const target = state.notifications.find((n) => n.id === action.id);
+      const counts = { ...state.notificationCounts };
+      if (target && !target.read) {
+        counts.unread = Math.max(0, counts.unread - 1);
+      }
       return {
         ...state,
         notifications: state.notifications.map((n) =>
           n.id === action.id ? { ...n, read: true } : n,
         ),
+        notificationCounts: counts,
+      };
+    }
+    case "RESOLVE_NOTIFICATION": {
+      const target = state.notifications.find((n) => n.id === action.id);
+      const counts = { ...state.notificationCounts };
+      if (target && target.type === "alert" && !target.resolved) {
+        counts.alerts = Math.max(0, counts.alerts - 1);
+        counts.resolved += 1;
+        if (!target.read) counts.unread = Math.max(0, counts.unread - 1);
+      }
+      return {
+        ...state,
+        notifications: state.notifications.map((n) =>
+          n.id === action.id ? { ...n, resolved: true, read: true } : n,
+        ),
+        notificationCounts: counts,
       };
     }
     case "MARK_ALL_NOTIFICATIONS_READ": {
       return {
         ...state,
         notifications: state.notifications.map((n) => ({ ...n, read: true })),
+        notificationCounts: { ...state.notificationCounts, unread: 0 },
       };
     }
     case "CLEAR_ALL_NOTIFICATIONS": {
       return {
         ...state,
         notifications: [],
+        notificationTotal: 0,
+        notificationCounts: { total: 0, unread: 0, alerts: 0, resolved: 0 },
       };
     }
     case "SET_PRICE": {
@@ -1145,13 +1305,39 @@ function reducer(state: StoreState, action: Action): StoreState {
         inventory: rest,
       };
     }
+    case "REPLACE_STORE_CATEGORIES": {
+      const { storeId, categories } = action;
+      if (!storeId) return state;
+      return {
+        ...state,
+        categoriesByStore: { ...state.categoriesByStore, [storeId]: categories },
+      };
+    }
     case "ADD_CATEGORY": {
       const name = action.name.trim();
-      if (!name || state.categories.includes(name)) return state;
-      return { ...state, categories: [...state.categories, name] };
+      const { storeId } = action;
+      if (!name || !storeId) return state;
+      const list = state.categoriesByStore[storeId] || [];
+      if (list.includes(name)) return state;
+      return {
+        ...state,
+        categoriesByStore: {
+          ...state.categoriesByStore,
+          [storeId]: [...list, name],
+        },
+      };
     }
     case "DELETE_CATEGORY": {
-      return { ...state, categories: state.categories.filter(c => c !== action.name) };
+      const { name, storeId } = action;
+      if (!storeId) return state;
+      const list = state.categoriesByStore[storeId] || [];
+      return {
+        ...state,
+        categoriesByStore: {
+          ...state.categoriesByStore,
+          [storeId]: list.filter((c) => c !== name),
+        },
+      };
     }
     case "SET_DAILY_SALES": {
       return { ...state, dailySales: action.payload };
@@ -1176,13 +1362,12 @@ function reducer(state: StoreState, action: Action): StoreState {
         const targetStore = state.allStores.find((s) => s.id === targetStoreId);
         if (!targetStore) return state;
         if (action.user.role === "Manager") {
-          // The Admin's own first/oversight store can never take a Manager.
-          if (targetStore.managerId || targetStore.isAdminStore) return state;
+          // A store can only ever have one Manager.
+          if (targetStore.managerId) return state;
         }
         if (action.user.role === "Cashier") {
-          // A Cashier can only sell at a store run by a Manager — never at
-          // the Admin's own first/oversight store.
-          if (!targetStore.managerId || targetStore.isAdminStore) return state;
+          // Cashiers can be added to any store, with or without a Manager.
+          if (targetStore.isAdminStore) return state;
         }
       }
       let newAllStores = state.allStores;
@@ -1227,7 +1412,7 @@ function reducer(state: StoreState, action: Action): StoreState {
         }
         if (
           action.user.role === "Cashier" &&
-          (!targetStore.managerId || targetStore.isAdminStore)
+          targetStore.isAdminStore
         ) {
           return state;
         }
@@ -1312,17 +1497,25 @@ function reducer(state: StoreState, action: Action): StoreState {
       if (action.user.status === "Pending") {
         return state;
       }
-      localStorage.setItem("sellsync_user", JSON.stringify(action.user));
 
-      // Keep a snapshot of the Admin session so an Admin who enters a store
-      // as a Manager/Cashier can switch back to their Admin account later.
-      let adminUser = state.adminUser;
-      if (action.user.role !== "Admin") {
-        if (!adminUser && state.currentUser?.role === "Admin") {
-          adminUser = state.currentUser;
-        }
-      } else {
-        adminUser = action.user;
+      // Downward-only impersonation: you may only ever act as a strictly
+      // lower role than the account that owns the session token. A Cashier
+      // cannot become a Manager or Admin; a Manager cannot become another
+      // Manager or an Admin. Only the Browser puts this through the reducer
+      // guard, it protects against any UI path that slips through.
+      const owner = state.sessionOwner;
+      const ownerRank = owner ? ROLE_RANK[owner.role] : Infinity;
+      if (owner && ROLE_RANK[action.user.role] >= ownerRank) {
+        console.warn(
+          `Blocked login as ${action.user.role} — session owner is ${owner.role}.`,
+        );
+        return state;
+      }
+
+      // Persist the persona to localStorage only for the session owner; an
+      // impersonated persona must never be re-seeded as the logged-in user.
+      if (!owner || action.user.id === owner.id) {
+        localStorage.setItem("sellsync_user", JSON.stringify(action.user));
       }
 
       // When logging in, set the current store to the first assigned store if the current one is not allowed
@@ -1347,7 +1540,7 @@ function reducer(state: StoreState, action: Action): StoreState {
         currentUser: action.user,
         currentStore: newStore,
         adminOverview: action.user.role === "Admin",
-        adminUser,
+        sessionOwner: owner || action.user,
       };
     }
     case "SET_ADMIN_OVERVIEW": {
@@ -1356,7 +1549,178 @@ function reducer(state: StoreState, action: Action): StoreState {
     case "LOGOUT_USER": {
       localStorage.removeItem("sellsync_user");
       localStorage.removeItem("sellsync_admin_user");
-      return { ...state, currentUser: null, adminUser: null };
+      localStorage.removeItem("sellsync_admin_overview");
+      return { ...state, currentUser: null, sessionOwner: null, adminOverview: false };
+    }
+    case "REPLACE_STORE_PRODUCTS": {
+      // Swap in the authoritative product list for a single store, leaving
+      // every other store's products untouched. This is what keeps a Cashier's
+      // open tab in sync after a Manager adds a product from another browser.
+      const { storeId, products } = action;
+      const kept: Record<string, InventoryItem> = {};
+      for (const [id, item] of Object.entries(state.inventory)) {
+        if (item.storeId !== storeId) kept[id] = item;
+      }
+      for (const p of products) kept[p.id] = p;
+      return { ...state, inventory: kept };
+    }
+    case "REPLACE_STORE_ANALYTICS": {
+      // Same per-store scoping as the products/transactions slices: a figure set
+      // is only ever read for the store it was fetched for.
+      const { storeId, analytics } = action;
+      return {
+        ...state,
+        analyticsByStore: { ...state.analyticsByStore, [storeId]: analytics },
+      };
+    }
+    case "REPLACE_STORE_INSIGHT": {
+      // Insights are per-store and per-viewer: a cashier's card summarises their
+      // own till while a manager's summarises the shop. Keying by storeId alone
+      // would therefore serve one role's figures to the other after a user
+      // switch, so the viewer's role is part of the key.
+      const { storeId, insight } = action;
+      const key = `${storeId}:${state.currentUser?.role ?? "?"}`;
+      const insightsByStore = { ...state.insightsByStore };
+      if (insight) insightsByStore[key] = insight;
+      else delete insightsByStore[key];
+      return { ...state, insightsByStore };
+    }
+    case "REPLACE_STORE_TRANSACTIONS": {
+      // Same idea as REPLACE_STORE_PRODUCTS, for sales.
+      //
+      // Transactions were only ever loaded once, during hydration, so the
+      // dashboard, reports and transaction list kept showing the totals from
+      // sign-in. A sale rung up on another till (or by another cashier) never
+      // appeared until the page was reloaded. Replacing the store's sales on a
+      // refresh is what makes those figures move on their own.
+      //
+      // Other stores' transactions are preserved: in the Admin overview more
+      // than one store is in view at a time.
+      const { storeId, transactions } = action;
+      const kept = state.transactions.filter((t) => t.storeId !== storeId);
+      return { ...state, transactions: [...transactions, ...kept] };
+    }
+    case "HYDRATE_DB": {
+      // Replaces the DB-backed slices with data pulled from the real backend.
+      // Local-only slices (attendance, payroll, settings, linking requests,
+      // bank accounts, etc.) are left untouched.
+      const {
+        me,
+        stores,
+        byStore,
+        notifications,
+        notificationTotal,
+        notificationCounts,
+      } = action.payload;
+      const role = mapRole(me.role);
+
+      // The first store is a normal store just like any other — it can take a
+      // Manager and Cashiers. Nothing is treated as an oversight store.
+      const dbStores: Store[] = stores.map((s) => mapStore(s));
+
+      const inventory: Record<string, InventoryItem> = {};
+      const transactions: Transaction[] = [];
+      const cashierUsers: User[] = [];
+      const managerUsers: User[] = [];
+      const posTerminals: POSTerminal[] = [];
+      const mixedTerminals: { id: string; name: string; type: "pos" | "linkedAccount" }[] =
+        [];
+      // Categories are shared per store from the backend — the taxonomy can no
+      // longer drift per-browser, so we do NOT merge stale localStorage here.
+      const categoriesByStore: Record<string, string[]> = {};
+
+      stores.forEach((s) => {
+        const bundle = byStore[s.id];
+        if (!bundle) return;
+        bundle.products.forEach((p) => {
+          const item = mapProduct(p);
+          inventory[item.id] = item;
+        });
+        bundle.transactions.forEach((t) => transactions.push(mapTransaction(t)));
+        bundle.cashiers.forEach((c) =>
+          cashierUsers.push(mapUser(c, s.id)),
+        );
+        bundle.managers.forEach((m) =>
+          managerUsers.push(mapUser(m, s.id)),
+        );
+        bundle.terminals.forEach((t) => {
+          const term = mapTerminal(t);
+          posTerminals.push(term);
+          mixedTerminals.push({ id: term.id, name: term.name, type: "pos" });
+        });
+        categoriesByStore[s.id] = bundle.categories || [];
+      });
+
+      const currentUser: User = {
+        ...mapUser(me, me.storeId || stores[0]?.id),
+        assignedStoreIds: dbStores.map((s) => s.id),
+      };
+
+      // A store is "run by a Manager" only when an actual MANAGER account is
+      // linked to it — derive managerId from the fetched managers.
+      const dbStoresWithManagers = dbStores.map((store) => {
+        const mgr = managerUsers.find(
+          (m) => m.assignedStoreIds?.[0] === store.id,
+        );
+        return mgr ? { ...store, managerId: mgr.id } : store;
+      });
+
+      // The DB is the source of truth for the team: the signed-up account
+      // owner (Admin) plus the real managers and cashiers. Stale local-only
+      // rows (like a bootstrapped "admin@sellsync.com" placeholder or
+      // duplicate profiles of the account owner) are dropped here.
+      const accountEmail = (me.email || "").toLowerCase();
+      const mergedUsers: User[] = [
+        currentUser,
+        ...managerUsers,
+        ...cashierUsers.filter(
+          (cu) => (cu.email || "").toLowerCase() !== accountEmail,
+        ),
+      ];
+
+      return {
+        ...state,
+        currentUser,
+        // The person who holds the session token IS the session owner. Any
+        // Admin/Manager acting as staff is a downward impersonation from here.
+        sessionOwner: currentUser,
+        adminOverview: role === "Admin",
+        allStores: dbStoresWithManagers,
+        // The DB is authoritative: a fresh account with no stores must land on
+        // onboarding, not keep a stale store from a previous session.
+        currentStore: dbStoresWithManagers[0] || null,
+        inventory,
+        transactions,
+        notifications: notifications.map(mapNotification),
+        notificationTotal,
+        notificationCounts,
+        posTerminals,
+        terminals: mixedTerminals,
+        users: mergedUsers,
+        categoriesByStore,
+      };
+    }
+    case "HYDRATE_EXTERNAL_LOGIN": {
+      // Seeded from a verified landing-page session cookie: log the user in
+      // and make sure their own store + user record exist.
+      const { user, store } = action;
+      const userExists = state.users.some((u) => u.id === user.id);
+      const users = userExists
+        ? state.users.map((u) => (u.id === user.id ? user : u))
+        : [...state.users, user];
+      const storeExists = state.allStores.some((s) => s.id === store.id);
+      const allStores = storeExists
+        ? state.allStores
+        : [...state.allStores, store];
+      return {
+        ...state,
+        users,
+        allStores,
+        currentStore: store,
+        currentUser: user,
+        sessionOwner: user,
+        adminOverview: user.role === "Admin",
+      };
     }
     case "SET_CURRENCY": {
       localStorage.setItem(
@@ -1364,6 +1728,9 @@ function reducer(state: StoreState, action: Action): StoreState {
         JSON.stringify(action.currency),
       );
       return { ...state, currency: action.currency };
+    }
+    case "SET_THEME": {
+      return { ...state, theme: action.theme };
     }
     case "UPDATE_STORE_PROFILE": {
       return {
@@ -1378,6 +1745,26 @@ function reducer(state: StoreState, action: Action): StoreState {
       return {
         ...state,
         notifications: state.notifications.map((n) => ({ ...n, read: true })),
+        notificationCounts: { ...state.notificationCounts, unread: 0 },
+      };
+    }
+    case "REPLACE_NOTIFICATIONS": {
+      // Swap in one page from the backend, plus the filtered total for the
+      // pager and the scope-wide KPI counts.
+      //
+      // Resolving is a local acknowledgement, so re-apply it for any id already
+      // resolved here. Without this a page read could drag resolved stock
+      // alerts back into the Alerts tab.
+      const resolvedIds = new Set(
+        state.notifications.filter((n) => n.resolved).map((n) => n.id),
+      );
+      return {
+        ...state,
+        notifications: action.notifications.map((n) =>
+          resolvedIds.has(n.id) ? { ...n, resolved: true } : n,
+        ),
+        notificationTotal: action.total,
+        notificationCounts: action.counts,
       };
     }
     case "UPDATE_PERMISSIONS": {
@@ -1811,7 +2198,17 @@ function reducer(state: StoreState, action: Action): StoreState {
           break;
         }
         case "delete_category": {
-          newState = { ...newState, categories: newState.categories.filter((c) => c !== req.payload.categoryName) };
+          const catStoreId = req.storeId || req.payload.storeId || "";
+          const list = newState.categoriesByStore[catStoreId] || [];
+          newState = {
+            ...newState,
+            categoriesByStore: {
+              ...newState.categoriesByStore,
+              [catStoreId]: list.filter(
+                (c) => c !== req.payload.categoryName,
+              ),
+            },
+          };
           break;
         }
         case "update_payment_settings": {
@@ -1937,35 +2334,73 @@ const StoreContext = createContext<
       // currentStore is exposed as non-null to consumers: Layout renders an
       // onboarding screen until a store exists, so pages never see null here.
       currentStore: Store;
+      setTheme: (theme: "light" | "dark") => void;
       setAdminOverview: (value: boolean) => void;
       allTransactions: Transaction[];
       allInventory: InventoryItem[];
-      completeSale: (payload: CompleteSalePayload) => void;
+      completeSale: (payload: CompleteSalePayload) => Promise<DbTransaction>;
       refundTransaction: (transactionId: string) => void;
       kpis: KPIs;
       salesTrend: SalesTrendPoint[];
       topProducts: TopProduct[];
       dynamicInsights: DynamicInsight[];
       inventoryArray: InventoryItem[];
-      addProduct: (p: Omit<InventoryItem, "id">) => void;
-      setProductStock: (productId: number, stock: number) => void;
-      setProductPrice: (productId: number, price: number) => void;
-      deleteProduct: (productId: number) => void;
+      addProduct: (p: Omit<InventoryItem, "id"> & { id?: string }) => void;
+      /**
+       * Re-pull a store's products from the backend. Called by the pages that
+       * display the catalog (Inventory, Products, POS, Dashboard) so every
+       * role reads the same database rows instead of a login-time snapshot.
+       * Safe to call repeatedly — concurrent calls share one request.
+       */
+      refreshProducts: (storeId?: string) => Promise<void>;
+      /**
+       * Re-pull a store's sales from the backend so the dashboard, reports and
+       * transaction list reflect sales made after sign-in — including by other
+       * cashiers. Safe to call repeatedly; concurrent calls share one request.
+       */
+      refreshTransactions: (storeId?: string) => Promise<void>;
+      /**
+       * Re-pull server-computed KPIs and the latest store insight. Used by the
+       * per-page refresh controls so a page can update itself in place instead
+       * of reloading the whole app.
+       */
+      refreshAnalytics: (storeId?: string) => Promise<void>;
+      refreshStoreInsight: (storeId?: string) => Promise<void>;
+      /** Re-pull the authoritative notification feed from the backend. */
+      refreshNotifications: () => Promise<void>;
+      /** Fetch one page of the notification table (10 rows per page). */
+      loadNotificationsPage: (opts?: {
+        page?: number;
+        filter?: string;
+        search?: string;
+      }) => Promise<{ page: number; total: number; totalPages: number }>;
+      /**
+       * Today's sales/units for the signed-in cashier, measured server-side and
+       * scoped to that cashier's own till.
+       */
+      fetchCashierKpis: (storeId?: string) => Promise<DbCashierKpis | null>;
+      setProductStock: (productId: string, stock: number) => void;
+      setProductPrice: (productId: string, price: number) => void;
+      deleteProduct: (productId: string) => void;
       addCategory: (name: string) => void;
       removeCategory: (name: string) => void;
-      setDailySales: (payload: Record<number, number>) => void;
-      markNotificationRead: (id: string) => void;
-      markAllNotificationsRead: () => void;
+      setDailySales: (payload: Record<string, number>) => void;
+      markNotificationRead: (id: string) => Promise<void>;
+      resolveNotification: (id: string) => Promise<void>;
+      markAllNotificationsRead: () => Promise<void>;
       clearAllNotifications: () => void;
       addUser: (u: User) => void;
       deleteUser: (userId: string) => void;
       updateUser: (u: User) => void;
-      addStore: (s: Store) => void;
+      addStore: (s: Store) => Promise<Store | void>;
       deleteStore: (storeId: string) => void;
       switchStore: (storeId: string) => void;
       loginUser: (u: User) => void;
-      switchBackToAdmin: () => void;
+      sessionOwner: User | null;
+      switchBackToOwner: () => Promise<void>;
       logoutUser: () => void;
+      status: "loading" | "auth" | "ready";
+      login: (email: string, password: string) => Promise<{ id: string; name: string; email: string; role: string }>;
       setCurrency: (c: Currency) => void;
       updateStoreProfile: (s: Store) => void;
       resetUnreadNotifications: () => void;
@@ -1973,7 +2408,7 @@ const StoreContext = createContext<
       updatePreferences: (p: Preferences) => void;
       addBankAccount: (account: BankAccount) => void;
       deleteBankAccount: (accountId: string) => void;
-      addPOSTerminal: (terminal: POSTerminal) => void;
+      addPOSTerminal: (terminal: POSTerminal) => Promise<void>;
       deletePOSTerminal: (terminalId: string) => void;
       updatePaymentSettings: (settings: Partial<PaymentSettings>) => void;
       setReceiptDefaults: (defaults: ReceiptDefaults) => void;
@@ -2019,7 +2454,7 @@ function computeDailySalesMap(transactions: Transaction[]) {
         transaction.status === "Completed" &&
         transaction.datetime.startsWith(today),
     )
-    .reduce<Record<number, number>>((acc, transaction) => {
+    .reduce<Record<string, number>>((acc, transaction) => {
       transaction.items.forEach((item) => {
         acc[item.productId] = (acc[item.productId] || 0) + item.qty;
       });
@@ -2028,46 +2463,41 @@ function computeDailySalesMap(transactions: Transaction[]) {
 }
 
 function computeKPIs(state: StoreState): KPIs {
-  const today = new Date().toISOString().slice(0, 10);
-  const yesterday = new Date(Date.now() - 86400000).toISOString().slice(0, 10);
+  // Rolling 24 hours against the 24 hours before that, matching the backend's
+  // window exactly. A fallback that used a different window than the server
+  // would visibly jump the cards on the first refresh, which is the same class
+  // of bug as the UTC/local split that used to sit here: this used to bucket by
+  // calendar day, so in the small hours every figure read zero while the chart
+  // below showed real revenue.
+  //
+  // Bucketing uses a local `datetime` string ("YYYY-MM-DDTHH:mm") rather than
+  // `toISOString().slice(0, 10)`, which would bucket by UTC and misfile
+  // post-midnight sales.
+  const windowMs = 24 * 60 * 60 * 1000;
+  const windowStart = Date.now() - windowMs;
+  const previousStart = Date.now() - windowMs * 2;
+  const at = (t: Transaction) => new Date(t.datetime).getTime();
 
-  const todaysTx = state.transactions.filter((t: Transaction) =>
-    t.datetime.startsWith(today),
+  const windowTx = state.transactions.filter(
+    (t: Transaction) => at(t) >= previousStart && t.status === "Completed",
   );
-  const yesterdaysTx = state.transactions.filter((t: Transaction) =>
-    t.datetime.startsWith(yesterday),
+  const currentTx = windowTx.filter((t: Transaction) => at(t) >= windowStart);
+  const previousTx = windowTx.filter(
+    (t: Transaction) => at(t) < windowStart && at(t) >= previousStart,
   );
 
-  const totalRevenueToday = todaysTx
-    .filter((t: Transaction) => t.status === "Completed")
-    .reduce((sum: number, t: Transaction) => sum + t.amount, 0);
-
-  const totalRevenueYesterday = yesterdaysTx
-    .filter((t: Transaction) => t.status === "Completed")
-    .reduce((sum: number, t: Transaction) => sum + t.amount, 0);
-
-  const totalSalesToday = todaysTx.filter(
-    (t: Transaction) => t.status === "Completed",
-  ).length;
-  const totalSalesYesterday = yesterdaysTx.filter(
-    (t: Transaction) => t.status === "Completed",
-  ).length;
-
-  const productsSoldToday = todaysTx
-    .filter((t: Transaction) => t.status === "Completed")
-    .reduce(
+  const total = (rows: Transaction[]) => ({
+    revenue: rows.reduce((sum: number, t: Transaction) => sum + t.amount, 0),
+    sales: rows.length,
+    units: rows.reduce(
       (sum: number, t: Transaction) =>
-        sum + t.items.reduce((s: number, i: CartItem) => s + i.qty, 0),
+        sum + t.items.reduce((n: number, i: CartItem) => n + i.qty, 0),
       0,
-    );
+    ),
+  });
 
-  const productsSoldYesterday = yesterdaysTx
-    .filter((t: Transaction) => t.status === "Completed")
-    .reduce(
-      (sum: number, t: Transaction) =>
-        sum + t.items.reduce((s: number, i: CartItem) => s + i.qty, 0),
-      0,
-    );
+  const current = total(currentTx);
+  const previous = total(previousTx);
 
   const lowStockCount = Object.values(state.inventory).filter(
     (i: InventoryItem) => i.stock < i.reorderPoint,
@@ -2076,9 +2506,23 @@ function computeKPIs(state: StoreState): KPIs {
     (i: InventoryItem) => i.stock < i.reorderPoint / 2,
   ).length;
 
-  const todayRefunds = todaysTx.filter(
-    (t: Transaction) => t.status === "Refunded",
-  ).length;
+  // Local fallback for the expiry figures, so the cards are still right during
+  // the window before the analytics response lands (or if it fails). Matches the
+  // API's definition: an item expiring within 30 days, and one already past.
+  const nowMs = Date.now();
+  const EXPIRY_WARNING_DAYS = 30;
+  const expiryCounts = Object.values(state.inventory).reduce(
+    (acc, item) => {
+      if (!item.expiryDate) return acc;
+      const at = new Date(item.expiryDate).getTime();
+      if (Number.isNaN(at)) return acc;
+      if (at < nowMs) acc.expiredCount += 1;
+      else if (at <= nowMs + EXPIRY_WARNING_DAYS * 86400000)
+        acc.expiringSoonCount += 1;
+      return acc;
+    },
+    { expiringSoonCount: 0, expiredCount: 0 },
+  );
 
   const getChange = (now: number, then: number) => {
     if (then === 0) return now > 0 ? 100 : 0;
@@ -2086,21 +2530,16 @@ function computeKPIs(state: StoreState): KPIs {
   };
 
   return {
-    totalRevenueToday,
-    totalRevenueTodayChange: getChange(
-      totalRevenueToday,
-      totalRevenueYesterday,
-    ),
-    totalSalesToday,
-    totalSalesTodayChange: getChange(totalSalesToday, totalSalesYesterday),
-    productsSoldToday,
-    productsSoldTodayChange: getChange(
-      productsSoldToday,
-      productsSoldYesterday,
-    ),
+    windowHours: 24,
+    totalRevenue24h: current.revenue,
+    totalRevenue24hChange: getChange(current.revenue, previous.revenue),
+    totalSales24h: current.sales,
+    totalSales24hChange: getChange(current.sales, previous.sales),
+    productsSold24h: current.units,
+    productsSold24hChange: getChange(current.units, previous.units),
     lowStockCount,
     lowStockCountChange: criticalStockCount, // We'll use this for the "X critical" label
-    todayRefunds,
+    ...expiryCounts,
   };
 }
 
@@ -2130,7 +2569,7 @@ function computeSalesTrend(state: StoreState): SalesTrendPoint[] {
 }
 
 function computeTopProducts(state: StoreState): TopProduct[] {
-  const productStats: Record<number, { unitsSold: number; revenue: number }> =
+  const productStats: Record<string, { unitsSold: number; revenue: number }> =
     {};
 
   state.transactions
@@ -2147,7 +2586,7 @@ function computeTopProducts(state: StoreState): TopProduct[] {
 
   const sortedProducts = Object.entries(productStats)
     .map(([id, stats]) => {
-      const product = state.inventory[Number(id)];
+      const product = state.inventory[id];
       if (!product) return null;
       return {
         id: product.id,
@@ -2203,17 +2642,17 @@ function computeDynamicInsights(
   }
 
   // Revenue Insight
-  if (kpis.totalRevenueTodayChange > 0) {
+  if (kpis.totalRevenue24hChange > 0) {
     insights.push({
       id: 2,
       type: "success",
-      message: `Revenue is up ${kpis.totalRevenueTodayChange}% compared to yesterday.`,
+      message: `Revenue is up ${kpis.totalRevenue24hChange}% over the last 24 hours.`,
     });
-  } else if (kpis.totalRevenueTodayChange < 0) {
+  } else if (kpis.totalRevenue24hChange < 0) {
     insights.push({
       id: 2,
       type: "warning",
-      message: `Revenue is down ${Math.abs(kpis.totalRevenueTodayChange)}% compared to yesterday.`,
+      message: `Revenue is down ${Math.abs(kpis.totalRevenue24hChange)}% over the last 24 hours.`,
     });
   }
 
@@ -2229,6 +2668,413 @@ function computeDynamicInsights(
 
 export function StoreProvider({ children }: { children: React.ReactNode }) {
   const [state, dispatch] = useReducer(reducer, initialState);
+  const [hydrated, setHydrated] = React.useState(false);
+
+  // Tracks the in-flight product refresh per store so that a page mount, a
+  // store switch and a window-focus event firing together only produce one
+  // request.
+  const inFlight = React.useRef<Record<string, Promise<void> | undefined>>(
+    {},
+  );
+
+  // The same thing for sales refreshes, which has its own lifecycle: a sale
+  // triggers one at checkout and the sync hook triggers another, and those must
+  // not both be in flight at once.
+  //
+  // This has to live at component level. Declared inside the context-value
+  // useMemo, React warns that a Hook was called from inside useMemo, and the
+  // ref would be recreated whenever the memo recomputed — defeating the point.
+  const txInFlight = React.useRef<Record<string, Promise<void> | undefined>>(
+    {},
+  );
+
+  // Same reasoning as txInFlight: this must be component level, not inside the
+  // context-value useMemo, or React flags a Hook called from useMemo and the
+  // in-flight guard would be thrown away on every recompute.
+  const analyticsInFlight = React.useRef<
+    Record<string, Promise<void> | undefined>
+  >({});
+
+  // =============================================================================
+  // SESSION BOOTSTRAP + BACKEND HYDRATION
+  // =============================================================================
+  // 1) Consume a landing-page handoff cookie (`sellsync_token` = real backend
+  //    JWT) if present and persist it locally.
+  // 2) When a session token exists, hydrate the DB-backed slices from the real
+  //    backend (account, stores, products/inventory, transactions, cashiers,
+  //    managers, terminals, notifications).
+  // No token after boot (or an invalid one) takes the user to the in-app Login
+  // screen — the app is backend-first now, so there is no offline/local-only
+  // mode that silently creates phantom stores and staff.
+  const [session, setSession] = React.useState<"loading" | "auth" | "ready">("loading");
+
+  // `Promise.allSettled` in the hydration loop turns a failed request into an
+  // empty array, which made "not authorised" look exactly like "this store has
+  // no products". Log the reason so the cause is visible in the console.
+  const reportHydrationFailure = (
+    resource: string,
+    storeId: string,
+    reason: unknown,
+  ): never[] => {
+    console.error(
+      `Hydration failed for ${resource} (store ${storeId}):`,
+      reason,
+    );
+    return [];
+  };
+
+  const hydrateFromDb = React.useCallback(async () => {    const me = (await db.auth.me()).data;
+
+    const stores =
+      me.role === "ADMIN" || me.role === "MANAGER"
+        ? (await db.stores.fetch()).data.stores
+        : (await db.stores.myStore()).data.stores;
+
+    const notificationPage = await db.notifications.fetch(
+      me.role === "ADMIN" ? undefined : stores[0]?.id,
+    );
+    const notifications = notificationPage.notifications;
+
+    const byStore: Record<
+      string,
+{
+            products: DbProduct[];
+            transactions: DbTransaction[];
+            cashiers: DbUser[];
+            managers: DbUser[];
+            terminals: DbTerminal[];
+            categories: string[];
+          }
+    > = {};
+
+    for (const s of stores) {
+      const [products, transactions, cashiers, managers, categories] = await Promise.allSettled([
+        db.products.fetch(s.id),
+        db.transactions.fetch(s.id),
+        db.cashiers.fetch(s.id),
+        db.managers.fetch(s.id),
+        db.categories.fetch(s.id),
+      ]);
+      let terminals: DbTerminal[] = [];
+      try {
+        terminals = (await db.terminals.fetch(s.id)).terminals;
+      } catch {
+        /* cashiers can't fetch terminals — leave empty */
+      }
+      byStore[s.id] = {
+        products:
+          products.status === "fulfilled"
+            ? products.value.products
+            : reportHydrationFailure("products", s.id, products.reason),
+        transactions:
+          transactions.status === "fulfilled"
+            ? transactions.value.transactions
+            : [],
+        cashiers: cashiers.status === "fulfilled" ? cashiers.value.cashiers : [],
+        managers: managers.status === "fulfilled" ? managers.value.managers : [],
+        terminals,
+        categories:
+          categories.status === "fulfilled"
+            ? categories.value.categories.map((c) => c.name)
+            : [],
+      };
+    }
+
+    dispatch({
+      type: "HYDRATE_DB",
+      payload: {
+        me,
+        stores,
+        byStore,
+        notifications,
+        notificationTotal: notificationPage.total,
+        notificationCounts: notificationPage.counts,
+      },
+    });
+
+    // The dashboard reads its figures from the backend, so ask for them as part
+    // of signing in rather than waiting for the first render to notice they are
+    // missing. A failure here leaves the local derivation in place.
+    await Promise.allSettled(stores.map((s) => refreshAnalytics(s.id)));
+    await Promise.allSettled(stores.map((s) => refreshStoreInsight(s.id)));
+  }, []);
+
+  React.useEffect(() => {
+    let cancelled = false;
+
+    (async () => {
+      try {
+        consumeHandoffCookie();
+        if (!getToken()) {
+          if (!cancelled) setSession("auth");
+          return;
+        }
+        await hydrateFromDb();
+        if (!cancelled) setSession("ready");
+      } catch (error) {
+        console.error("Backend hydration failed:", error);
+        // Invalid/expired token — drop it and ask the user to sign in again.
+        clearToken();
+        if (!cancelled) setSession("auth");
+      } finally {
+        if (!cancelled) setHydrated(true);
+      }
+    })();
+
+    return () => {
+      cancelled = true;
+    };
+  }, [hydrateFromDb]);
+
+  // =============================================================================
+  // Session expiry
+  // =============================================================================
+  // `lib/db.ts` cannot reach into the store, so a request that fails
+  // authentication clears the token and fires SESSION_EXPIRED_EVENT. Without
+  // this listener the app would sit on a dead session: every call rejected,
+  // nothing telling the user why. One handler ends the session everywhere.
+  React.useEffect(() => {
+    const onExpired = () => {
+      dispatch({ type: "LOGOUT_USER" });
+      setSession("auth");
+      toast.error("Your session has expired. Please sign in again.");
+    };
+    window.addEventListener(SESSION_EXPIRED_EVENT, onExpired);
+    return () => window.removeEventListener(SESSION_EXPIRED_EVENT, onExpired);
+  }, []);
+
+  // =============================================================================
+  // ANALYTICS REFRESH
+  // =============================================================================
+  /**
+   * Pull the dashboard's headline figures from the backend.
+   *
+   * Each of the five endpoints is independent, so one failure (a Cashier
+   * being refused a chart route, say) must not blank the whole dashboard —
+   * `allSettled` keeps whatever came back and the KPI cards fall back to the
+   * local derivation for the rest. Nothing here is awaited by the render
+   * path, so a slow analytics query cannot delay the first paint.
+   */
+  const refreshAnalytics = async (storeId?: string): Promise<void> => {
+    const target = storeId || state.currentStore?.id;
+    if (!target || !getToken()) return;
+    if (target === "S-ALL") return;
+    if (analyticsInFlight.current[target]) return analyticsInFlight.current[target];
+
+    const request = (async () => {
+      try {
+        const [kpis, trend, topProducts, byCategory, hourly] =
+          await Promise.allSettled([
+            db.analytics.kpis(target),
+            db.analytics.salesTrend(target),
+            db.analytics.topProducts(target),
+            db.analytics.salesByCategory(target),
+            db.analytics.hourlySales(target),
+          ]);
+
+        if (kpis.status !== "fulfilled") {
+          console.error(
+            `Analytics KPI refresh failed for store ${target}:`,
+            kpis.reason,
+          );
+          return;
+        }
+
+        const value = (kpis.value.kpis || {}) as Partial<KPIs>;
+        dispatch({
+          type: "REPLACE_STORE_ANALYTICS",
+          storeId: target,
+          analytics: {
+            kpis: {
+              windowHours: value.windowHours ?? 24,
+              totalRevenue24h: value.totalRevenue24h ?? 0,
+              totalRevenue24hChange: value.totalRevenue24hChange ?? 0,
+              totalSales24h: value.totalSales24h ?? 0,
+              totalSales24hChange: value.totalSales24hChange ?? 0,
+              productsSold24h: value.productsSold24h ?? 0,
+              productsSold24hChange: value.productsSold24hChange ?? 0,
+              lowStockCount: value.lowStockCount ?? 0,
+              lowStockCountChange: value.lowStockCountChange ?? 0,
+              expiringSoonCount: value.expiringSoonCount ?? 0,
+              expiredCount: value.expiredCount ?? 0,
+            },
+            trend:
+              trend.status === "fulfilled" ? trend.value.dailySales || [] : [],
+            topProducts:
+              topProducts.status === "fulfilled"
+                ? topProducts.value.topProducts || []
+                : [],
+            salesByCategory:
+              byCategory.status === "fulfilled"
+                ? byCategory.value.salesByCategory || []
+                : [],
+            hourlySales:
+              hourly.status === "fulfilled" ? hourly.value.hourlySales || [] : [],
+          },
+        });
+      } finally {
+        delete analyticsInFlight.current[target];
+      }
+    })();
+
+    analyticsInFlight.current[target] = request;
+    return request;
+  };
+
+  /**
+   * Today's till figures for the signed-in cashier, measured by the backend.
+   *
+   * Deliberately *not* stored in state: it is a point-in-time snapshot the
+   * cashier dashboard reads on mount and after a sale, and caching it in the
+   * store risked it going stale behind the local transaction list. The backend
+   * scopes a CASHIER to their own `cashierId`, so the numbers are that till's.
+   */
+  const fetchCashierKpis = async (
+    storeId?: string,
+  ): Promise<DbCashierKpis | null> => {
+    const target = storeId || state.currentStore?.id;
+    if (!target || !getToken()) return null;
+    try {
+      const cashierId = state.currentUser?.role === "CASHIER" ? state.currentUser?.id : undefined;
+      const { cashierKpis } = await db.analytics.cashierKpis(target, cashierId);
+      return cashierKpis;
+    } catch (error) {
+      console.error(`Cashier KPI fetch failed for store ${target}:`, error);
+      return null;
+    }
+  };
+
+  // =============================================================================
+  // INSIGHT REFRESH
+  // =============================================================================
+  // The dashboard's insight cards read GET /ai/:storeId/insight instead of being
+  // generated in the browser. `generateInsights` produced its sparkline points
+  // with Math.random() and stamped its cards at fabricated 8-minute intervals, so
+  // the numbers on screen were decoration. Everything now is measured server-side
+  // from the store's own transactions and inventory.
+  //
+  // Scope comes from the backend and differs by role on purpose: a manager reads
+  // the store-wide summary, a cashier reads their own till. Because the two are
+  // different data, the state is keyed by store *and* role — switching users
+  // without switching stores would otherwise show one role's figures to the
+  // other.
+  const insightInFlight = React.useRef<Record<string, Promise<void> | undefined>>({});
+
+  const refreshStoreInsight = React.useCallback(async (storeId?: string) => {
+    const target = storeId || state.currentStore?.id;
+    if (!target || !getToken()) return;
+    if (target === "S-ALL") return;
+    if (insightInFlight.current[target]) return insightInFlight.current[target];
+
+    const request = (async () => {
+      try {
+        const res = await db.insights.fetch(target);
+        dispatch({
+          type: "REPLACE_STORE_INSIGHT",
+          storeId: target,
+          insight: {
+            success: res.success,
+            scope: res.scope,
+            title: res.title,
+            summary: res.summary ?? null,
+            insights: res.insights || [],
+          },
+        });
+      } catch (error) {
+        // The backend can legitimately have nothing yet. Clear any stale card
+        // rather than leaving a previous store's summary on screen.
+        console.error(`Insight refresh failed for store ${target}:`, error);
+        dispatch({ type: "REPLACE_STORE_INSIGHT", storeId: target, insight: null });
+      } finally {
+        delete insightInFlight.current[target];
+      }
+    })();
+
+    insightInFlight.current[target] = request;
+    return request;
+  }, [state.currentStore?.id]);
+
+  // =============================================================================
+  // NOTIFICATION REFRESH
+  // =============================================================================
+  // One helper, three triggers. The feed is owned by the backend, so the UI
+  // re-reads it rather than patching it locally:
+  //   - after a write (a sale), so the new entry appears immediately
+  //   - when the tab regains focus, so a cashier on another till is seen
+  //   - on a slow interval, as a backstop for a tab left open all day
+  // Load one page of the notification table. The page component owns the
+  // current page / tab / search; this just fetches that slice and stores the
+  // filtered total (pager) plus the scope-wide KPI counts from the backend.
+  const loadNotificationsPage = React.useCallback(
+    async (opts: { page?: number; filter?: string; search?: string } = {}) => {
+      if (!getToken()) return { page: 1, total: 0, totalPages: 0 };
+      // Admins own every store, so their feed must span all of them — scoping
+      // to the admin's own (empty) store was why their notification list stayed
+      // at zero while sales were being recorded elsewhere. Everyone else is
+      // scoped to their store.
+      const storeId =
+        state.currentUser?.role === "Admin"
+          ? undefined
+          : state.currentStore?.id;
+      const result = await db.notifications.fetch(storeId, {
+        page: opts.page ?? 1,
+        limit: 10,
+        filter: opts.filter,
+        search: opts.search,
+      });
+      dispatch({
+        type: "REPLACE_NOTIFICATIONS",
+        notifications: result.notifications.map(mapNotification),
+        total: result.total,
+        counts: result.counts,
+      });
+      return {
+        page: result.page,
+        total: result.total,
+        totalPages: result.totalPages,
+      };
+    },
+    [state.currentStore?.id, state.currentUser?.role],
+  );
+
+  // Re-read page one (and the KPI counts) after a write, on focus, and on the
+  // slow poll. The Notifications page pauses those triggers while it is open so
+  // they cannot yank the user back to page one.
+  const refreshNotifications = React.useCallback(async () => {
+    await loadNotificationsPage({ page: 1 });
+  }, [loadNotificationsPage]);
+
+  React.useEffect(() => {
+    if (!hasToken() || session !== "ready") return;
+
+    const onFocus = () => {
+      // The feed is paged on the Notifications page; a focus refresh there
+      // would reset the list to page one and drop the pages already loaded.
+      if (window.location.pathname === "/notifications") return;
+      refreshNotifications().catch((error) =>
+        console.error("Notification refresh failed:", error),
+      );
+    };
+    window.addEventListener("focus", onFocus);
+    return () => window.removeEventListener("focus", onFocus);
+  }, [refreshNotifications, session]);
+
+  React.useEffect(() => {
+    if (!hasToken() || session !== "ready") return;
+    // 60s: often enough to notice a colleague's activity, rare enough not to
+    // matter on a till. Visibility is also checked so a backgrounded tab that
+    // browsers throttle does not keep polling. Skipped on the Notifications
+    // page for the same paging reason as the focus handler.
+    const id = window.setInterval(() => {
+      if (
+        document.visibilityState === "visible" &&
+        window.location.pathname !== "/notifications"
+      ) {
+        refreshNotifications().catch(() => {});
+      }
+    }, 60_000);
+    return () => window.clearInterval(id);
+  }, [refreshNotifications, session]);
 
   // =============================================================================
   // BACKEND_INTEGRATION: Data Fetching on Mount
@@ -2273,71 +3119,34 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     }
   }, [state.theme]);
 
-  // Daily Expiry Check
-  React.useEffect(() => {
-    if (!state.paymentSettings.enableExpiryNotifications) return;
-
-    const checkExpiries = () => {
-      const today = new Date();
-      today.setHours(0, 0, 0, 0);
-      const inventoryArray = Object.values(state.inventory);
-
-      inventoryArray.forEach((product) => {
-        if (!product.expiryDate) return;
-
-        const expiry = new Date(product.expiryDate);
-        expiry.setHours(0, 0, 0, 0);
-
-        const diffTime = expiry.getTime() - today.getTime();
-        const diffDays = Math.ceil(diffTime / (1000 * 60 * 60 * 24));
-
-        if ([30, 7, 1].includes(diffDays) || diffDays === 0 || diffDays < 0) {
-          const alertType =
-            diffDays < 0
-              ? "expired"
-              : diffDays === 0
-                ? "expires today"
-                : `expires in ${diffDays} days`;
-          const notificationId = `EXP-${product.id}-${diffDays}-${today.toDateString()}`;
-
-          // Check if we already sent this specific notification today
-          const alreadyExists = state.notifications.some(
-            (n) => n.id === notificationId,
-          );
-
-          if (!alreadyExists) {
-            dispatch({
-              type: "ADD_NOTIFICATION",
-              notification: {
-                id: notificationId,
-                type: diffDays <= 7 ? "alert" : "warning",
-                title: diffDays < 0 ? "Product Expired" : "Expiry Alert",
-                message: `${product.name} (SKU: ${product.sku}) ${alertType}. Current Stock: ${product.stock}. Store: ${state.currentStore?.name || ""}`,
-                timestamp: new Date().toISOString(),
-                read: false,
-                productId: product.id,
-                link: "/products",
-              },
-            });
-
-            // Mock SMS/Email sending
-            console.log(
-              `[EXPIRY ALERT] Sending ${state.paymentSettings.enableReceiptSMS ? "SMS" : ""} ${state.paymentSettings.enableReceiptEmail ? "Email" : ""} to ${state.currentStore?.phone || ""}/${state.currentStore?.email || ""}: ${product.name} ${alertType}`,
-            );
-          }
-        }
-      });
-    };
-
-    // Run once on mount and then every 24 hours (simulated by checking every hour)
-    checkExpiries();
-    const interval = setInterval(checkExpiries, 3600000); // Check every hour
-    return () => clearInterval(interval);
-  }, [
-    state.inventory,
-    state.paymentSettings.enableExpiryNotifications,
-    state.currentStore,
-  ]);
+  // Expiry alerts are NOT generated here.
+  //
+  // This used to run a `checkExpiries` sweep every hour which built notification
+  // objects in memory and dispatched them into client state. It was removed
+  // because none of it was real:
+  //
+  //   - a notification created in the browser is not in the database, so it
+  //     existed on this tab only, vanished on reload, and never reached the
+  //     owner's phone. Low-stock alerts had already moved to the backend;
+  //     expiry alerts were the last ones still pretending.
+  //   - it logged `[EXPIRY ALERT] Sending SMS/Email to <phone>/<email>` for
+  //     every product it saw. Nothing was sent. An operator watching that
+  //     console believed expiry alerts were going out to customers.
+  //   - the dedupe key was rebuilt in memory each pass, so "already sent" could
+  //     not survive a reload and the same alert re-fired forever.
+  //
+  // Expiry is now scanned server-side (services/expiry.service.js): an hourly
+  // sweep plus an immediate rescan whenever a product's date changes. Each
+  // (product, urgency band) fires exactly once, enforced by a unique index, and
+  // the alert arrives as a real Notification row that every device sees.
+  //
+  // KNOWN GAP: `paymentSettings.enableExpiryNotifications` no longer has any
+  // effect. It was never more than a client-side flag (there is no settings
+  // table on Store, so it has never survived a device change), and now that the
+  // decision is made on the server there is nowhere for the server to read it
+  // from. Turning the toggle off currently silences nothing. Wiring it properly
+  // needs a per-store settings column or table, which is a design decision
+  // rather than a bug fix — flagged rather than guessed at.
 
   // Persistence logic
   // =============================================================================
@@ -2395,22 +3204,14 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     );
     localStorage.setItem("sellsync_theme", state.theme);
     localStorage.setItem("sellsync_currency", JSON.stringify(state.currency));
-    localStorage.setItem("sellsync_user", JSON.stringify(state.currentUser));
+    // Persist the logged-in persona only for the true session owner — an
+    // impersonated Manager/Cashier must never be re-seeded as the account.
+    if (!state.sessionOwner || state.currentUser?.id === state.sessionOwner.id) {
+      localStorage.setItem("sellsync_user", JSON.stringify(state.currentUser));
+    }
     localStorage.setItem(
       "sellsync_admin_overview",
       String(state.adminOverview),
-    );
-    if (state.adminUser) {
-      localStorage.setItem(
-        "sellsync_admin_user",
-        JSON.stringify(state.adminUser),
-      );
-    } else {
-      localStorage.removeItem("sellsync_admin_user");
-    }
-    localStorage.setItem(
-      "sellsync_categories",
-      JSON.stringify(state.categories),
     );
     localStorage.setItem(
       "sellsync_bank_accounts",
@@ -2494,6 +3295,21 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         ) {
           return isAdmin;
         }
+        // A Cashier's feed is stock/product events only. "Sale Recorded" is
+        // written for every store member, but a cashier does not need their own
+        // or a colleague's sale echoed back at them — that is the Manager's
+        // reconciliation view. Filtering here (not just on the page) keeps the
+        // unread badge and toast from counting sales too.
+        if (state.currentUser?.role === "Cashier") {
+          const t = (n.title || "").toLowerCase();
+          const isStockEvent =
+            t.includes("low stock") ||
+            t.includes("out of stock") ||
+            t.includes("expiry") ||
+            t.includes("expired") ||
+            t.includes("new product");
+          return isStockEvent;
+        }
         return true;
       }
       const product = state.inventory[n.productId];
@@ -2508,20 +3324,45 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
     );
     const computedDailySales = computeDailySalesMap(filteredTransactions);
 
-    const kpis = computeKPIs({
+    // Server figures win. The local derivation stays as the fallback for the
+    // window between first paint and the analytics response, and for a store
+    // whose analytics request failed — the dashboard should never sit at zero
+    // just because the aggregate query had not landed yet.
+    const serverAnalytics = state.currentStore
+      ? state.analyticsByStore[state.currentStore.id]
+      : undefined;
+
+    const kpis = serverAnalytics?.kpis ?? computeKPIs({
       ...state,
       inventory: scopedInventory,
       transactions: filteredTransactions,
     });
-    const salesTrend = computeSalesTrend({
-      ...state,
-      transactions: filteredTransactions,
-    });
-    const topProducts = computeTopProducts({
-      ...state,
-      inventory: scopedInventory,
-      transactions: filteredTransactions,
-    });
+    const salesTrend = serverAnalytics
+      ? (serverAnalytics.trend || []).map((p) => ({
+          day: p.date,
+          sales: p.revenue,
+        }))
+      : computeSalesTrend({
+          ...state,
+          transactions: filteredTransactions,
+        });
+    const topProducts = serverAnalytics
+      ? (serverAnalytics.topProducts || []).map((p, i) => ({
+          id: i,
+          name: p.productName,
+          unitsSold: p.unitsSold,
+          // The endpoint ranks by units; revenue and stock per product are not
+          // part of it, so they are left at 0 rather than invented. The chart
+          // renders units.
+          revenue: 0,
+          stock: 0,
+          stockStatus: "healthy" as const,
+        }))
+      : computeTopProducts({
+          ...state,
+          inventory: scopedInventory,
+          transactions: filteredTransactions,
+        });
     const dynamicInsights = computeDynamicInsights(
       {
         ...state,
@@ -2531,22 +3372,15 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       kpis,
     );
 
-    const abbreviateAmount = (num: number): string => {
-      if (num >= 1_000_000_000) return `${(num / 1_000_000_000).toFixed(1)}B`;
-      if (num >= 1_000_000) return `${(num / 1_000_000).toFixed(1)}M`;
-      if (num >= 1_000) return `${(num / 1_000).toFixed(1)}k`;
-      return num.toLocaleString(undefined, { minimumFractionDigits: 2, maximumFractionDigits: 2 });
-    };
-
-    const formatCurrency = (amount: number, full?: boolean) => {
+    const formatCurrency = (amount: number) => {
       const { symbol, id } = state.currency || { id: "NGN", symbol: "₦" };
       const rate = (id && state.exchangeRates[id]) || 1;
       const convertedAmount = amount * rate;
 
-      if (convertedAmount >= 1000 && !full) {
-        return `${symbol}${abbreviateAmount(convertedAmount)}`;
-      }
-
+      // Full amounts only. This used to short-circuit to "₦1.5M" for anything
+      // over a thousand, which meant a headline revenue figure on the dashboard
+      // silently disagreed with the receipts that produced it. The `full` flag
+      // that used to opt out of abbreviation is gone with it.
       try {
         return new Intl.NumberFormat("en-US", {
           style: "currency",
@@ -2562,8 +3396,135 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
 
     const role = state.currentUser?.role || "Cashier";
 
+    // Categories are stored per store (backend-driven). Expose the union when
+    // the Admin is overseeing all stores, otherwise the active store's list —
+    // so POS/Inventory/Products dropdowns keep working unchanged.
+    const categories = isAdminOverview
+      ? Array.from(new Set(Object.values(state.categoriesByStore).flat()))
+      : (state.categoriesByStore[state.currentStore?.id || ""] || []);
+
+    /**
+     * Re-read a store's products (and categories) from the API and replace the
+     * local copy.
+     *
+     * This is a plain local function rather than a property of the value
+     * object below so that `addProduct`, `updateProduct` and `deleteProduct`
+     * can call it. When it was only an object property, those three referenced
+     * an undeclared identifier and every product mutation died with
+     * "refreshProducts is not defined" inside the .then() — after the API call
+     * had already succeeded, so the row appeared to save and then vanished.
+     */
+    const refreshProducts = async (storeId?: string): Promise<void> => {
+      const target = storeId || state.currentStore?.id;
+      if (!target || !getToken()) return;
+      // In Admin "all stores" overview there is no single store to sync.
+      if (target === "S-ALL") return;
+
+      // Collapse concurrent calls (page mount + focus + store switch firing
+      // together) into a single request.
+      if (inFlight.current[target]) return inFlight.current[target];
+
+      const request = (async () => {
+        try {
+          const { products } = await db.products.fetch(target);
+          const items = products.map(mapProduct);
+          dispatch({
+            type: "REPLACE_STORE_PRODUCTS",
+            storeId: target,
+            products: items,
+          });
+          // Categories are shared too: a product created elsewhere can
+          // introduce a category this browser has never seen.
+          try {
+            const { categories: freshCategories } =
+              await db.categories.fetch(target);
+            dispatch({
+              type: "REPLACE_STORE_CATEGORIES",
+              storeId: target,
+              categories: freshCategories.map((c) => c.name),
+            });
+          } catch (error) {
+            console.error("Category refresh failed:", error);
+          }
+        } catch (error) {
+          // Previously these failures were swallowed by Promise.allSettled,
+          // which made "not permitted" look identical to "no products".
+          console.error(`Product refresh failed for store ${target}:`, error);
+        } finally {
+          delete inFlight.current[target];
+        }
+      })();
+
+      inFlight.current[target] = request;
+      return request;
+    };
+
+    /**
+     * Re-read a store's sales from the API and replace the local copy.
+     *
+     * Mirrors `refreshProducts`: same in-flight collapsing so a page mount, a
+     * focus event and a store switch cannot fire three overlapping reads, and
+     * errors are logged rather than swallowed so "not permitted" never looks
+     * like "no sales".
+     */
+    const refreshTransactions = async (storeId?: string): Promise<void> => {
+      const target = storeId || state.currentStore?.id;
+      if (!target || !getToken()) return;
+      if (target === "S-ALL") return;
+      if (txInFlight.current[target]) return txInFlight.current[target];
+
+      const request = (async () => {
+        try {
+          const { transactions } = await db.transactions.fetch(target);
+          dispatch({
+            type: "REPLACE_STORE_TRANSACTIONS",
+            storeId: target,
+            transactions: transactions.map(mapTransaction),
+          });
+        } catch (error) {
+          console.error(`Transaction refresh failed for store ${target}:`, error);
+        } finally {
+          delete txInFlight.current[target];
+        }
+      })();
+
+      txInFlight.current[target] = request;
+      return request;
+    };
+
+    /**
+     * Mark every notification read, and persist it.
+     *
+     * Defined here as a plain function rather than inline in the returned
+     * object because `resetUnreadNotifications` (the bell in Layout.tsx) has to
+     * call the same thing. When it only existed as a property of the object
+     * being built, the reference threw `markAllNotificationsRead is not
+     * defined` during render and took down the whole app on login.
+     */
+    const markAllNotificationsRead = (): Promise<void> => {
+      let request: Promise<unknown> = Promise.resolve();
+      if (getToken()) {
+        // Admins read every store's feed, so "mark all" must not be narrowed to
+        // the admin's own store; everyone else is scoped to theirs.
+        const storeId =
+          state.currentUser?.role === "Admin"
+            ? undefined
+            : state.currentStore?.id;
+        request = db.notifications
+          .markAllRead(storeId)
+          .catch((error) =>
+            console.error("Notifications failed to persist:", error),
+          );
+      }
+      dispatch({ type: "MARK_ALL_NOTIFICATIONS_READ" });
+      // The local state updates immediately; callers that want a fresh page
+      // (e.g. the Notifications table) can await the persistence.
+      return request.then(() => undefined);
+    };
+
     return {
       ...state,
+      categories,
       currentStore: state.currentStore as Store,
       setAdminOverview: (value: boolean) =>
         dispatch({ type: "SET_ADMIN_OVERVIEW", value }),
@@ -2577,27 +3538,236 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       dailySales: computedDailySales,
       transactions: filteredTransactions,
       notifications: filteredNotifications,
+      posTerminals: state.posTerminals.filter((terminal) => {
+        if (isAdminOverview) return true;
+        return (
+          !terminal.storeId || terminal.storeId === state.currentStore?.id
+        );
+      }),
       attendance: filteredAttendance,
       payroll: filteredPayroll,
       linkingRequests: filteredLinkingRequests,
       formatCurrency,
-      completeSale: (payload: CompleteSalePayload) =>
-        dispatch({ type: "COMPLETE_SALE", payload }),
+      /**
+       * Record a sale.
+       *
+       * The database is the source of truth, so the API call happens FIRST and
+       * is awaited. This used to be fire-and-forget with a `console.error`
+       * catch, which meant a rejected sale (insufficient stock, deactivated
+       * product, no store) still showed the success screen, still printed a
+       * receipt, and still decremented local stock — while nothing was written
+       * to the database. The discount was also never sent, so the amount
+       * recorded was the gross, not the discounted total.
+       *
+       * On success the local state is updated for responsiveness and the caller
+       * re-syncs from the server. On failure this throws and deliberately does
+       * NOT dispatch, so the local inventory is not decremented for a sale that
+       * does not exist.
+       */
+      completeSale: async (payload: CompleteSalePayload) => {
+        const storeId = state.currentStore?.id;
+
+        if (!getToken()) {
+          throw new Error("You must be signed in to record a sale.");
+        }
+        if (!storeId || storeId === "S-ALL") {
+          // The Admin "all stores" overview has no single store to bill to.
+          throw new Error(
+            "Select a single store before recording a sale.",
+          );
+        }
+        if (!payload.items.length) {
+          throw new Error("Cannot record an empty sale.");
+        }
+
+        // Throws on a non-2xx response; `request` surfaces the server message.
+        const { transaction } = await db.transactions.create({
+          storeId,
+          paymentMethod: payload.payment,
+          items: payload.items.map((i) => ({
+            productId: i.productId,
+            quantity: i.qty,
+          })),
+          discount: payload.discount,
+        });
+
+        dispatch({ type: "COMPLETE_SALE", payload });
+
+        // The sale is committed, so pull the authoritative feed. The backend
+        // records the sale itself and any low-stock condition, and refreshes
+        // the store's AI insight in the background.
+        //
+        // Awaited, but a failure here must not turn a completed sale into an
+        // error the cashier sees at the till — the receipt is already valid.
+        try {
+          await Promise.all([
+            refreshNotifications(),
+            refreshTransactions(storeId),
+            // Revenue, sale count and unit count for the day all just moved, so
+            // the headline figures have to come back from the backend too.
+            refreshAnalytics(storeId),
+            // The insight summary quotes revenue and sale counts, both of which
+            // this sale just changed.
+            refreshStoreInsight(storeId),
+          ]);
+        } catch (error) {
+          console.error("Post-sale refresh failed:", error);
+        }
+
+        return transaction;
+      },
       refundTransaction: (transactionId: string) =>
         dispatch({ type: "REFUND_TRANSACTION", transactionId }),
-      adjustStock: (productId: number, delta: number) =>
-        dispatch({ type: "ADJUST_STOCK", productId, delta }),
-      addProduct: (p: Omit<InventoryItem, "id">) =>
-        dispatch({ type: "ADD_PRODUCT", product: p }),
-      updateProduct: (p: InventoryItem) =>
-        dispatch({ type: "UPDATE_PRODUCT", product: p }),
-      setProductStock: (productId: number, stock: number) =>
-        dispatch({ type: "SET_STOCK", productId, stock }),
-      setProductPrice: (productId: number, price: number) =>
-        dispatch({ type: "SET_PRICE", productId, price }),
-      deleteProduct: (productId: number) => {
+      adjustStock: (productId: string, delta: number) => {
+        const storeId = state.currentStore?.id;
+        const prod = state.inventory[productId];
+        const newQty = Math.max(0, (prod?.stock || 0) + delta);
+        if (getToken() && storeId && prod) {
+          db.products
+            .stock(storeId, productId, {
+              quantity: newQty,
+              lowThreshold: prod.reorderPoint,
+            })
+            .catch((error) =>
+              console.error("Stock change failed to persist:", error),
+            );
+        }
+        dispatch({ type: "ADJUST_STOCK", productId, delta });
+      },
+      refreshProducts,
+      refreshTransactions,
+      refreshAnalytics,
+      refreshStoreInsight,
+      refreshNotifications,
+      loadNotificationsPage,
+      fetchCashierKpis,
+      addProduct: (p: Omit<InventoryItem, "id">) => {
+      const storeId = state.currentStore?.id;
+      if (!getToken() || !storeId) {
+        // Offline / no session: keep the row locally only.
+        dispatch({ type: "ADD_PRODUCT", product: { ...p, id: crypto.randomUUID() } });
+        return;
+      }
+
+      // The database is the source of truth, exactly as it is for categories:
+      // POST to createProduct, then re-query getAllProducts instead of
+      // hand-patching local state (which previously invented a product even
+      // when the API rejected it, hiding the real error).
+      db.products
+        .create(storeId, {
+          name: p.name,
+          sku: p.sku,
+          category: p.category,
+          price: p.price,
+          barcode: p.barcode,
+          quantity: p.stock,
+          lowThreshold: p.reorderPoint,
+          imageUrl: p.imageUrl,
+        })
+        .then(() => refreshProducts(storeId))
+        .catch((error) => {
+          console.error("Product failed to persist:", error);
+          toast.error("Could not save product", {
+            description:
+              error?.message || "The server rejected this product.",
+          });
+        });
+    },
+      updateProduct: (product: InventoryItem) => {
+        const storeId = state.currentStore?.id;
+        if (!getToken() || !storeId) {
+          dispatch({ type: "UPDATE_PRODUCT", product });
+          return;
+        }
+        const fields: {
+          name: string;
+          sku: string;
+          category: string;
+          price: number;
+          barcode: string;
+        } = {
+          name: product.name,
+          sku: product.sku || "",
+          category: product.category,
+          price: product.price,
+          barcode: product.barcode || "",
+        };
+        db.products
+          .update(storeId, product.id, fields)
+          .then(() =>
+            // Stock lives on its own endpoint, then re-read the catalog so the
+            // row reflects what the server actually stored.
+            db.products.stock(storeId, product.id, {
+              quantity: product.stock,
+              lowThreshold: product.reorderPoint,
+            }),
+          )
+          .then(() => refreshProducts(storeId))
+          .catch((error) => {
+            console.error("Product failed to persist:", error);
+            toast.error("Could not update product", {
+              description:
+                error?.message || "The server rejected these changes.",
+            });
+            // Re-read so the UI falls back to the stored values, not the
+            // rejected ones.
+            refreshProducts(storeId);
+          });
+      },
+      setProductStock: (productId: string, stock: number) => {
+        const storeId = state.currentStore?.id;
+        if (getToken() && storeId) {
+          db.products
+            .stock(storeId, productId, { quantity: stock })
+            .then(() => refreshProducts(storeId))
+            .catch((error) => {
+              console.error("Stock change failed to persist:", error);
+              toast.error("Could not change stock", {
+                description:
+                  error?.message || "The server rejected this quantity.",
+              });
+              refreshProducts(storeId);
+            });
+          return;
+        }
+        dispatch({ type: "SET_STOCK", productId, stock });
+      },
+      setProductPrice: (productId: string, price: number) => {
+        const storeId = state.currentStore?.id;
+        if (getToken() && storeId) {
+          // Send only the field being edited — PATCH is partial on both sides —
+          // then re-read the catalog. Dispatching optimistically here used to
+          // leave the screen showing a price the server had rejected.
+          db.products
+            .update(storeId, productId, { price })
+            .then(() => refreshProducts(storeId))
+            .catch((error) => {
+              console.error("Price change failed to persist:", error);
+              toast.error("Could not change price", {
+                description:
+                  error?.message || "The server rejected this price.",
+              });
+              // Fall back to whatever is actually stored.
+              refreshProducts(storeId);
+            });
+          return;
+        }
+        dispatch({ type: "SET_PRICE", productId, price });
+      },
+      deleteProduct: (productId: string) => {
         if (state.currentUser?.role === "Admin" && state.adminOverview) {
-          dispatch({ type: "DELETE_PRODUCT", productId });
+          const storeId = state.currentStore?.id;
+          if (!getToken() || !storeId || !state.inventory[productId]) return;
+          db.products
+            .deactivate(storeId, productId)
+            .then(() => refreshProducts(storeId))
+            .catch((error) => {
+              console.error("Product delete failed to persist:", error);
+              toast.error("Could not delete product", {
+                description:
+                  error?.message || "The server rejected the delete.",
+              });
+            });
         } else {
           const product = state.inventory[productId];
           const request: PendingApproval = {
@@ -2615,54 +3785,240 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           dispatch({ type: "SUBMIT_APPROVAL_REQUEST", request });
         }
       },
-      addCategory: (name: string) => dispatch({ type: "ADD_CATEGORY", name }),
-      removeCategory: (name: string) => {
-        if (state.currentUser?.role === "Admin" && state.adminOverview) {
-          dispatch({ type: "DELETE_CATEGORY", name });
-        } else {
-          const request: PendingApproval = {
-            id: `apr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
-            actionType: "delete_category",
-            payload: { categoryName: name },
-            requesterId: state.currentUser?.id || "",
-            requesterName: state.currentUser?.name || "Unknown",
-            requesterRole: state.currentUser?.role || "Cashier",
-            storeId: state.currentStore?.id || "",
-            storeName: state.currentStore?.name || "",
-            status: "pending",
-            createdAt: new Date().toISOString(),
-          };
-          dispatch({ type: "SUBMIT_APPROVAL_REQUEST", request });
+      addCategory: (name: string) => {
+      const storeId = state.currentStore?.id || "";
+      // Persist to the backend so every account in the store shares the
+      // taxonomy. Optimistic local update keeps the UI instant.
+      if (getToken() && storeId) {
+        db.categories.create(storeId, name).catch((error) =>
+          console.error("Category failed to persist:", error),
+        );
+      }
+      dispatch({ type: "ADD_CATEGORY", name, storeId });
+    },
+    removeCategory: (name: string) => {
+      const storeId =
+        state.currentStore?.id ||
+        Object.entries(state.categoriesByStore).find(([, list]) =>
+          list.includes(name),
+        )?.[0] ||
+        "";
+      if (state.currentUser?.role === "Admin" && state.adminOverview) {
+        if (getToken() && storeId) {
+          db.categories
+            .remove(storeId, name)
+            .catch((error) =>
+              console.error("Category delete failed to persist:", error),
+            );
         }
-      },
-      setDailySales: (payload: Record<number, number>) =>
+        dispatch({ type: "DELETE_CATEGORY", name, storeId });
+      } else {
+        const request: PendingApproval = {
+          id: `apr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
+          actionType: "delete_category",
+          payload: { categoryName: name },
+          requesterId: state.currentUser?.id || "",
+          requesterName: state.currentUser?.name || "Unknown",
+          requesterRole: state.currentUser?.role || "Cashier",
+          storeId: storeId || state.currentStore?.id || "",
+          storeName: state.currentStore?.name || "",
+          status: "pending",
+          createdAt: new Date().toISOString(),
+        };
+        dispatch({ type: "SUBMIT_APPROVAL_REQUEST", request });
+      }
+    },
+      setDailySales: (payload: Record<string, number>) =>
         dispatch({ type: "SET_DAILY_SALES", payload }),
-      markNotificationRead: (id: string) =>
-        dispatch({ type: "MARK_NOTIFICATION_READ", id }),
-      markAllNotificationsRead: () =>
-        dispatch({ type: "MARK_ALL_NOTIFICATIONS_READ" }),
+      markNotificationRead: (id: string): Promise<void> => {
+        const request = getToken()
+          ? db.notifications
+              .markRead(id)
+              .then(() => undefined)
+              .catch((error) =>
+                console.error("Notification failed to persist:", error),
+              )
+          : Promise.resolve();
+        dispatch({ type: "MARK_NOTIFICATION_READ", id });
+        return request;
+      },
+      resolveNotification: (id: string): Promise<void> => {
+        const request = getToken()
+          ? db.notifications
+              .resolve(id)
+              .then(() => undefined)
+              .catch((error) =>
+                console.error("Notification resolve failed to persist:", error),
+              )
+          : Promise.resolve();
+        dispatch({ type: "RESOLVE_NOTIFICATION", id });
+        return request;
+      },
+      markAllNotificationsRead,
       clearAllNotifications: () =>
         dispatch({ type: "CLEAR_ALL_NOTIFICATIONS" }),
-      addUser: (user: User) => dispatch({ type: "ADD_USER", user }),
-      deleteUser: (userId: string) => dispatch({ type: "DELETE_USER", userId }),
+      addUser: (user: User) => {
+        // Managers and Cashiers are persisted as REAL backend accounts so they
+        // can log in on the landing page. The returned record is reloaded into
+        // state so UI ids match the DB. A backend failure is surfaced instead
+        // of silently creating a manager that only exists in localStorage.
+        const isStaff =
+          user.role === "Manager" || user.role === "Cashier";
+        const targetStoreId = user.assignedStoreIds?.[0] || state.currentStore?.id;
+        if (getToken() && isStaff && targetStoreId) {
+          const password = user.password || (user.role === "Cashier" ? "Cashier@123" : "Manager@123");
+          const api = user.role === "Manager" ? db.managers : db.cashiers;
+          api
+            .create(targetStoreId, {
+              name: user.name,
+              email: user.email,
+              password,
+            })
+            .then(async () => {
+              const list =
+                user.role === "Manager"
+                  ? (await db.managers.fetch(targetStoreId)).managers
+                  : (await db.cashiers.fetch(targetStoreId)).cashiers;
+              const created = list.find((c) => c.email === user.email);
+              if (created) {
+                dispatch({
+                  type: "ADD_USER",
+                  user: {
+                    ...mapUser(created, targetStoreId),
+                    password: user.password,
+                  },
+                });
+              }
+            })
+            .catch((error) => {
+              console.error("Staff failed to persist:", error);
+              toast.error(
+                `Could not create ${user.role}\u2019s account: ${
+                  (error as Error).message || "backend error"
+                }`,
+              );
+            });
+        } else {
+          dispatch({ type: "ADD_USER", user });
+        }
+      },
+      deleteUser: (userId: string) => {
+        const target = state.users.find((u) => u.id === userId);
+        const storeId = state.currentStore?.id;
+        const onError = (error: unknown) => {
+          console.error("Staff deactivate failed to persist:", error);
+          toast.error(
+            `Could not remove ${target?.role ?? "user"}: ${
+              (error as Error).message || "backend error"
+            }`,
+          );
+        };
+        if (getToken() && target && storeId) {
+          if (target.role === "Cashier") {
+            db.cashiers
+              .deactivate(storeId, userId)
+              .catch(onError);
+          } else if (target.role === "Manager") {
+            db.managers
+              .deactivate(storeId, userId)
+              .catch(onError);
+          }
+        }
+        dispatch({ type: "DELETE_USER", userId });
+      },
       updateUser: (user: User) => dispatch({ type: "UPDATE_USER", user }),
-      addStore: (store: Store) => dispatch({ type: "ADD_STORE", store }),
-      deleteStore: (storeId: string) =>
-        dispatch({ type: "DELETE_STORE", storeId }),
+      addStore: (store: Store) => {
+        if (getToken()) {
+          return db.stores
+            .create({
+              name: store.name,
+              location: store.address,
+              phone: store.phone,
+              email: store.email,
+            })
+            .then(({ store: created }) => {
+              const mapped = mapStore(created);
+              dispatch({ type: "ADD_STORE", store: mapped });
+              return mapped;
+            })
+            .catch((error) => {
+              console.error("Store failed to persist:", error);
+              toast.error(
+                `Could not create the store: ${
+                  (error as Error).message || "backend error"
+                }`,
+              );
+              return undefined;
+            });
+        }
+        // Offline/legacy path — keep the local record so the app still works.
+        dispatch({ type: "ADD_STORE", store });
+        return Promise.resolve(store);
+      },
+      deleteStore: (storeId: string) => {
+        if (getToken()) {
+          db.stores
+            .deactivate(storeId)
+            .catch((error) =>
+              console.error("Store delete failed to persist:", error),
+            );
+        }
+        dispatch({ type: "DELETE_STORE", storeId });
+      },
       switchStore: (storeId: string) =>
         dispatch({ type: "SWITCH_STORE", storeId }),
       loginUser: (user: User) => dispatch({ type: "LOGIN_USER", user }),
-      switchBackToAdmin: () => {
-        if (!state.adminUser) return;
-        dispatch({ type: "LOGIN_USER", user: state.adminUser });
+      sessionOwner: state.sessionOwner,
+      switchBackToOwner: async () => {
+        if (!state.sessionOwner) return;
+        // Re-hydrate from the backend with the session owner's token. This is
+        // the source of truth: it restores the owner's full view (all stores,
+        // managers and cashiers for an Admin; the owned store and its staff
+        // for a Manager) and clears whatever persona was being impersonated.
+        try {
+          await hydrateFromDb();
+        } catch (error) {
+          console.error("Switch back failed to re-hydrate:", error);
+          toast.error("Could not restore your session. Please sign in again.");
+        }
       },
-      logoutUser: () => dispatch({ type: "LOGOUT_USER" }),
+      logoutUser: () => {
+        if (getToken()) clearToken();
+        dispatch({ type: "LOGOUT_USER" });
+        setSession("auth");
+      },
+      status: session,
+      login: async (email, password) => {
+        const res = await db.auth.login(email, password);
+        setToken(res.token);
+        await hydrateFromDb();
+        setSession("ready");
+        return res.data;
+      },
+      setTheme: (theme: "light" | "dark") =>
+        dispatch({ type: "SET_THEME", theme }),
       setCurrency: (currency: Currency) =>
         dispatch({ type: "SET_CURRENCY", currency }),
-      updateStoreProfile: (store: Store) =>
-        dispatch({ type: "UPDATE_STORE_PROFILE", store }),
+      updateStoreProfile: (store: Store) => {
+        if (getToken()) {
+          db.stores
+            .update(store.id, {
+              name: store.name,
+              location: store.address,
+              phone: store.phone,
+              email: store.email,
+            })
+            .catch((error) =>
+              console.error("Store update failed to persist:", error),
+            );
+        }
+        dispatch({ type: "UPDATE_STORE_PROFILE", store });
+      },
       resetUnreadNotifications: () =>
-        dispatch({ type: "RESET_UNREAD_NOTIFICATIONS" }),
+        // Persist, don't just repaint. The bell is the "mark all read" control,
+        // and it used to clear the badge in local state only — so the unread
+        // count came straight back on reload and on the manager's other device.
+        markAllNotificationsRead(),
       updatePermissions: (permissions: PermissionMatrix) =>
         dispatch({ type: "UPDATE_PERMISSIONS", permissions }),
       updatePreferences: (preferences: Preferences) =>
@@ -2706,9 +4062,30 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           dispatch({ type: "SUBMIT_APPROVAL_REQUEST", request });
         }
       },
-      addPOSTerminal: (terminal: POSTerminal) => {
-        if (state.currentUser?.role === "Admin" && state.adminOverview) {
-          dispatch({ type: "ADD_POS_TERMINAL", terminal });
+      addPOSTerminal: async (terminal: POSTerminal) => {
+        const role = state.currentUser?.role;
+        const storeId = state.currentStore?.id;
+        const canManageTerminals = role === "Admin" || role === "Manager";
+
+        if (
+          canManageTerminals &&
+          storeId &&
+          storeId !== "S-ALL" &&
+          getToken()
+        ) {
+          const { terminal: saved } = await db.terminals.add(storeId, {
+            terminalSerial:
+              terminal.serialNumber || terminal.terminalId || terminal.name,
+            label: terminal.name,
+            provider: terminal.provider,
+            phoneNumber: terminal.phoneNumber,
+            deviceLocation: terminal.deviceLocation,
+            merchantId: terminal.merchantId,
+          });
+          dispatch({
+            type: "ADD_POS_TERMINAL",
+            terminal: saved ? mapTerminal(saved) : terminal,
+          });
         } else {
           const request: PendingApproval = {
             id: `apr-${Date.now()}-${Math.random().toString(36).slice(2, 7)}`,
@@ -2726,7 +4103,22 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         }
       },
       deletePOSTerminal: (terminalId: string) => {
-        if (state.currentUser?.role === "Admin" && state.adminOverview) {
+        const role = state.currentUser?.role;
+        const terminal = state.posTerminals.find((t) => t.id === terminalId);
+        const storeId = terminal?.storeId || state.currentStore?.id;
+        const canManageTerminals = role === "Admin" || role === "Manager";
+
+        if (
+          canManageTerminals &&
+          storeId &&
+          storeId !== "S-ALL" &&
+          getToken()
+        ) {
+          db.terminals
+            .deactivate(storeId, terminalId)
+            .catch((error) =>
+              console.error("Terminal delete failed to persist:", error),
+            );
           dispatch({ type: "DELETE_POS_TERMINAL", terminalId });
         } else {
           const terminal = state.posTerminals.find((t) => t.id === terminalId);
@@ -2859,12 +4251,50 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
         return canEditModule(state.permissions, role, module);
       },
       pendingApprovals: state.pendingApprovals,
-      approveApprovalRequest: (requestId: string) =>
-        dispatch({ type: "APPROVE_APPROVAL_REQUEST", requestId }),
+      approveApprovalRequest: (requestId: string) => {
+        // Approving a delete must also reach the backend — otherwise the
+        // "approved" row only vanishes from this browser and reappears on the
+        // next hydration.
+        const req = state.pendingApprovals.find(
+          (r) => r.id === requestId && r.status === "pending",
+        );
+        if (req && getToken()) {
+          if (req.actionType === "delete_category") {
+            const catStoreId =
+              req.storeId ||
+              (req.payload as { storeId?: string }).storeId ||
+              "";
+            const categoryName = (req.payload as { categoryName?: string })
+              .categoryName;
+            if (catStoreId && categoryName) {
+              db.categories
+                .remove(catStoreId, categoryName)
+                .catch((error) =>
+                  console.error("Category delete failed:", error),
+                );
+            }
+          } else if (req.actionType === "delete_product") {
+            const productId = (req.payload as { productId?: string }).productId;
+            if (req.storeId && productId) {
+              db.products
+                .deactivate(req.storeId, productId)
+                .catch((error) =>
+                  console.error("Product delete failed:", error),
+                );
+            }
+          }
+        }
+        dispatch({ type: "APPROVE_APPROVAL_REQUEST", requestId });
+      },
       rejectApprovalRequest: (requestId: string, reason?: string) =>
         dispatch({ type: "REJECT_APPROVAL_REQUEST", requestId, reason }),
     };
-  }, [state]);
+  }, [state, hydrateFromDb]);
+
+  // Wait for the external-login handoff (if any) before first paint so the
+  // app does not flash the onboarding screen.
+  if (!hydrated) return null;
+
   return (
     <StoreContext.Provider value={value}>{children}</StoreContext.Provider>
   );
@@ -2876,4 +4306,73 @@ export function useStore() {
     throw new Error("useStore must be used within StoreProvider");
   }
   return ctx;
+}
+
+/**
+ * Keeps a page's product catalog and sales figures in sync with the database.
+ *
+ * Every page that lists products (Inventory, Products, POS, Dashboard) calls
+ * this so Manager and Cashier read the same rows. It refreshes on mount, when
+ * the active store changes, when the tab regains focus, and on a slow interval
+ * while the tab is visible — which is what makes a Cashier's already-open tab
+ * pick up a product a Manager just created in another browser.
+ *
+ * Sales are refreshed through the same triggers. Transactions used to be read
+ * exactly once, during sign-in hydration, which pinned every revenue total,
+ * chart and transaction list to the figures at that moment: a sale rung up on
+ * another till, or by another cashier, only appeared after a manual reload.
+ */
+export function useProductSync(pollMs = 45000) {
+  const {
+    refreshProducts,
+    refreshTransactions,
+    refreshAnalytics,
+    refreshStoreInsight,
+    currentStore,
+    currentUser,
+  } = useStore();
+  const storeId = currentStore?.id;
+
+  React.useEffect(() => {
+    if (!storeId || storeId === "S-ALL") return;
+    if (!currentUser) return;
+
+    // Sales first: the product read is already covered for the pages that show
+    // the catalog, and these two are independent, so neither waits on the other.
+    refreshTransactions(storeId);
+    refreshProducts(storeId);
+    refreshAnalytics(storeId);
+    refreshStoreInsight(storeId);
+
+    const onFocus = () => {
+      if (document.visibilityState !== "visible") return;
+      refreshTransactions(storeId);
+      refreshProducts(storeId);
+      refreshAnalytics(storeId);
+      refreshStoreInsight(storeId);
+    };
+    window.addEventListener("focus", onFocus);
+    document.addEventListener("visibilitychange", onFocus);
+
+    const timer =
+      pollMs > 0
+        ? window.setInterval(() => {
+            if (document.visibilityState !== "visible") return;
+            refreshTransactions(storeId);
+            refreshProducts(storeId);
+            refreshAnalytics(storeId);
+            refreshStoreInsight(storeId);
+          }, pollMs)
+        : undefined;
+
+    return () => {
+      window.removeEventListener("focus", onFocus);
+      document.removeEventListener("visibilitychange", onFocus);
+      if (timer) window.clearInterval(timer);
+    };
+    // `refreshProducts`/`refreshTransactions` are recreated on every state
+    // change; depending on them would re-run this effect (and the poll) on
+    // unrelated updates.
+    // eslint-disable-next-line react-hooks/exhaustive-deps
+  }, [storeId, currentUser?.id, pollMs]);
 }

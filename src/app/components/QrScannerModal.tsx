@@ -132,7 +132,7 @@ export function QrScannerModal({ isOpen, onClose, onScanSuccess }: QrScannerModa
               <DialogTitle className="text-xl font-black text-gray-900">Scan QR / Barcode</DialogTitle>
               <DialogDescription className="text-gray-500 font-medium">Align the code within the frame to scan</DialogDescription>
             </div>
-            <Button variant="ghost" size="icon" onClick={onClose} className="rounded-full" title="Close" aria-label="Close">
+            <Button variant="ghost" size="icon" onClick={onClose} className="rounded-full" aria-label="Close">
               <X className="w-5 h-5" />
             </Button>
           </div>

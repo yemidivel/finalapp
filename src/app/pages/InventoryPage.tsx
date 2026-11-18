@@ -2,32 +2,28 @@ import { useMemo, useState, useEffect } from "react";
 import { useLocation } from "react-router";
 import {
   Search,
-  Filter,
   Plus,
   Download,
-  MoreVertical,
   Package,
   AlertTriangle,
   CheckCircle2,
+  Check,
   ChevronUp,
   ChevronDown,
   Trash2,
   Tag,
   ArrowRight,
   TrendingUp,
-  TrendingDown,
-  ExternalLink,
   ChevronRight,
   ChevronLeft,
   Pin,
   Minus,
   FileText,
   FileSpreadsheet,
-  XCircle,
   X,
-  QrCode,
 } from "lucide-react";
 import { Card, CardContent } from "../components/ui/card";
+import { Stagger } from "../../animations/Stagger";
 import { Button } from "../components/ui/button";
 import { Input } from "../components/ui/input";
 import { Badge } from "../components/ui/badge";
@@ -52,9 +48,8 @@ import {
   SelectTrigger,
   SelectValue,
 } from "../components/ui/select";
-import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter } from "../components/ui/dialog";
+import { Dialog, DialogContent, DialogHeader, DialogTitle, DialogFooter, DialogClose } from "../components/ui/dialog";
 import { Sheet, SheetContent, SheetHeader, SheetTitle } from "../components/ui/sheet";
-import { Checkbox } from "../components/ui/checkbox";
 import { Tooltip, TooltipContent, TooltipProvider, TooltipTrigger } from "../components/ui/tooltip";
 import { Progress } from "../components/ui/progress";
 import { ScrollArea } from "../components/ui/scroll-area";
@@ -62,9 +57,44 @@ import { jsPDF } from "jspdf";
 import "jspdf-autotable";
 import * as XLSX from "xlsx";
 import { toast } from "sonner";
-import { useStore } from "../state/store";
+import { useStore, useProductSync } from "../state/store";
 import { KPIValue } from "../components/KPIValue";
-import { downloadProductQrCode } from "../../lib/qrcode";
+import {
+  buildProductImageUrl,
+  placeholderProductImage,
+  fetchProductImage,
+} from "../../lib/productImage";
+import { AddProductModal } from "../components/AddProductModal";
+
+function InventoryThumb({
+  name,
+  imageUrl,
+  pinned,
+}: {
+  name: string;
+  imageUrl?: string;
+  pinned?: boolean;
+}) {
+  const [failed, setFailed] = useState(false);
+  const src = failed
+    ? placeholderProductImage(name)
+    : imageUrl || buildProductImageUrl(name);
+  return (
+    <div className="w-10 h-10 rounded-lg flex items-center justify-center overflow-hidden border border-outline-variant/50 bg-surface-container shrink-0">
+      {pinned ? (
+        <Pin className="w-4 h-4 text-primary-container" />
+      ) : (
+        <img
+          src={src}
+          alt={name}
+          loading="lazy"
+          onError={() => setFailed(true)}
+          className="w-full h-full object-cover"
+        />
+      )}
+    </div>
+  );
+}
 
 export function InventoryPage() {
   const {
@@ -75,6 +105,7 @@ export function InventoryPage() {
     deleteProduct,
     addCategory,
     removeCategory,
+    addProduct,
     adjustStock,
     theme,
     currency,
@@ -85,6 +116,10 @@ export function InventoryPage() {
     currentStore,
     adminOverview,
   } = useStore();
+  // Read products from the database (not a login-time snapshot) so this
+  // page stays in sync across Manager and Cashier sessions.
+  useProductSync();
+
 
   const location = useLocation();
 
@@ -149,6 +184,7 @@ export function InventoryPage() {
   // Interaction State
   const [selectedRows, setSelectedRows] = useState<number[]>([]);
   const [addCatOpen, setAddCatOpen] = useState(false);
+  const [isAddProductOpen, setIsAddProductOpen] = useState(false);
   const [newCategoryName, setNewCategoryName] = useState("");
   const [deleteCategoryName, setDeleteCategoryName] = useState<string | null>(null);
   const [viewItemId, setViewItemId] = useState<number | null>(null);
@@ -245,22 +281,58 @@ export function InventoryPage() {
 
   const metrics = useMemo(() => {
     const stockOnHand = inventoryArray.reduce((sum, item) => sum + item.stock, 0);
-    const critical = inventoryArray.filter((item) => item.stock < thresholds.critical).length;
-    const low = inventoryArray.filter((item) => item.stock >= thresholds.critical && item.stock < thresholds.low).length;
+
+    // Stock levels are judged against each product's OWN reorder point, not one
+    // global cut-off. A line that warns at 50 units is not "healthy" at 30
+    // just because 30 clears a hardcoded <10 rule, and a line that warns at 5
+    // is not "in stock" at 9. The global thresholds stay as a floor for
+    // products that have no reorder point set at all (0).
+    const lowAt = (item: { stock: number; reorderPoint: number }) => {
+      const point = item.reorderPoint > 0 ? item.reorderPoint : thresholds.low;
+      return item.stock <= point;
+    };
+    const criticalAt = (item: { stock: number; reorderPoint: number }) => {
+      if (item.stock <= 0) return true;
+      const point = item.reorderPoint > 0 ? item.reorderPoint : thresholds.low;
+      return item.stock <= Math.max(1, Math.floor(point / 2));
+    };
+
+    const critical = inventoryArray.filter(criticalAt).length;
+    const low = inventoryArray.filter(
+      (item) => lowAt(item) && !criticalAt(item),
+    ).length;
+
     const now = new Date();
     const todayStart = new Date(now.getFullYear(), now.getMonth(), now.getDate());
     const thirtyDaysFromNow = new Date(todayStart);
     thirtyDaysFromNow.setDate(thirtyDaysFromNow.getDate() + 30);
 
-    const expiring = inventoryArray.filter((item) => {
+    // `expiryDate` is now actually populated by mapProduct, so these two finally
+    // have data to work with. Out-of-stock lines are excluded from "expiring"
+    // (there is nothing to sell) but an expired line is always worth surfacing.
+    const withExpiry = inventoryArray.filter((item) => {
       if (!item.expiryDate) return false;
+      return !Number.isNaN(new Date(item.expiryDate).getTime());
+    });
+
+    const expiring = withExpiry.filter((item) => {
       if (item.stock <= 0) return false;
-      const expiry = new Date(item.expiryDate);
+      const expiry = new Date(item.expiryDate!);
       return expiry >= todayStart && expiry <= thirtyDaysFromNow;
     }).length;
 
-    return { stockOnHand, critical, low, expiring };
+    const expired = withExpiry.filter(
+      (item) => new Date(item.expiryDate!) < todayStart,
+    ).length;
+
+    return { stockOnHand, critical, low, expiring, expired };
   }, [inventoryArray, thresholds]);
+
+  const { activeCategories, unusedCategories } = useMemo(() => {
+    const usedSet = new Set(inventoryArray.map((p) => p.category));
+    const active = categories.filter((c) => usedSet.has(c)).length;
+    return { activeCategories: active, unusedCategories: categories.length - active };
+  }, [categories, inventoryArray]);
 
   const handleSort = (key: string) => {
     setSortConfig((prev) => ({
@@ -269,6 +341,8 @@ export function InventoryPage() {
     }));
   };
 
+  // Status is icon-only; the label expands on hover so the column stays compact.
+  // Mirrors the status cell on the transactions list.
   const getStatusBadge = (item: any) => {
     const stock = item.stock;
     const expiryDate = item.expiryDate ? new Date(item.expiryDate) : null;
@@ -276,45 +350,51 @@ export function InventoryPage() {
     const thirtyDaysFromNow = new Date();
     thirtyDaysFromNow.setDate(today.getDate() + 30);
 
+    let circle = "bg-[#00A651] group-hover/status:bg-[#008a43]";
+    let labelColor = "text-[#00A651]";
+    let text = "Healthy";
+    let Icon = Check;
+
     if (expiryDate && expiryDate < today) {
-      return (
-        <Badge className="bg-red-100 text-red-700 hover:bg-red-100 border-red-200">
-          <XCircle className="w-3 h-3 mr-1" />
-          Expired
-        </Badge>
-      );
+      circle = "bg-red-500 group-hover/status:bg-red-600";
+      labelColor = "text-red-600";
+      text = "Expired";
+      Icon = AlertTriangle;
+    } else if (expiryDate && expiryDate <= thirtyDaysFromNow) {
+      circle = "bg-orange-500 group-hover/status:bg-orange-600";
+      labelColor = "text-orange-600";
+      text = "Expiring Soon";
+      Icon = AlertTriangle;
+    } else {
+      // Judged against the product's own reorder point, so the icon agrees with
+      // the Critical / Low Stock cards at the top of the page.
+      const point = item.reorderPoint > 0 ? item.reorderPoint : thresholds.low;
+      if (stock <= Math.max(1, Math.floor(point / 2))) {
+        circle = "bg-red-500 group-hover/status:bg-red-600";
+        labelColor = "text-red-600";
+        text = "Critical Stock";
+        Icon = AlertTriangle;
+      } else if (stock <= point) {
+        circle = "bg-amber-500 group-hover/status:bg-amber-600";
+        labelColor = "text-amber-600";
+        text = "Low Stock";
+        Icon = AlertTriangle;
+      }
     }
 
-    if (expiryDate && expiryDate <= thirtyDaysFromNow) {
-      return (
-        <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100 border-orange-200">
-          <AlertTriangle className="w-3 h-3 mr-1" />
-          Expiring Soon
-        </Badge>
-      );
-    }
-
-    if (stock < thresholds.critical) {
-      return (
-        <Badge className="bg-red-100 text-red-700 hover:bg-red-100 border-red-200">
-          <AlertTriangle className="w-3 h-3 mr-1" />
-          Critical Stock
-        </Badge>
-      );
-    }
-    if (stock < thresholds.low) {
-      return (
-        <Badge className="bg-yellow-100 text-yellow-700 hover:bg-yellow-100 border-yellow-200">
-          <AlertTriangle className="w-3 h-3 mr-1" />
-          Low Stock
-        </Badge>
-      );
-    }
     return (
-      <Badge className="bg-green-100 text-green-700 hover:bg-green-100 border-green-200">
-        <CheckCircle2 className="w-3 h-3 mr-1" />
-        Healthy
-      </Badge>
+      <span className="group/status inline-flex items-center gap-1.5">
+        <span
+          className={`w-7 h-7 rounded-full flex items-center justify-center shrink-0 transition-colors duration-200 ${circle}`}
+        >
+          <Icon className="w-4 h-4 text-white" />
+        </span>
+        <span
+          className={`max-w-0 overflow-hidden whitespace-nowrap text-xs font-semibold opacity-0 group-hover/status:max-w-[6.5rem] group-hover/status:opacity-100 transition-all duration-200 ${labelColor}`}
+        >
+          {text}
+        </span>
+      </span>
     );
   };
 
@@ -322,8 +402,14 @@ export function InventoryPage() {
     const rows = [
       ["Product Name", "SKU", "Category", "Stock", "Status", "Price", "Created At"],
       ...filteredItems.map((i) => {
-        const status = i.stock < thresholds.critical ? "Critical" : i.stock < thresholds.low ? "Low Stock" : "In Stock";
-        return [i.name, i.sku, i.category, String(i.stock), status, String(i.price), i.createdAt];
+        const iPoint = i.reorderPoint > 0 ? i.reorderPoint : thresholds.low;
+        const iStatus =
+          i.stock <= Math.max(1, Math.floor(iPoint / 2))
+            ? "Critical"
+            : i.stock <= iPoint
+              ? "Low Stock"
+              : "In Stock";
+        return [i.name, i.sku, i.category, String(i.stock), iStatus, String(i.price), i.createdAt];
       }),
     ];
     const csv = rows.map((r) => r.map((v) => `"${String(v).replace(/"/g, '""')}"`).join(",")).join("\n");
@@ -412,17 +498,12 @@ export function InventoryPage() {
   const isAdminAllStores = currentUser?.role === "Admin" && adminOverview;
 
   return (
-    <div className={`p-6 space-y-6 min-h-screen ${theme === 'dark' ? 'bg-gray-950 text-gray-100' : 'bg-white text-gray-900'}`}>
+    <Stagger className={`px-6 pt-2 pb-8 space-y-6 min-h-screen ${theme === 'dark' ? 'bg-gray-900 text-gray-100' : 'bg-surface text-on-surface'}`}>
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-black tracking-tight">Inventory</h1>
-            {isAdminAllStores && (
-              <Badge className="bg-indigo-600 text-white border-none font-black text-[9px] uppercase tracking-wider px-2 py-0.5 rounded-lg">
-                All Stores
-              </Badge>
-            )}
+            <h1 className="text-3xl font-black tracking-tight text-gray-900 dark:text-white">Inventory</h1>
           </div>
           <p className="text-sm text-gray-500 mt-1 font-medium">
             {isAdminAllStores
@@ -431,32 +512,13 @@ export function InventoryPage() {
           </p>
         </div>
         <div className="flex items-center gap-3">
-          {!isGlobalView && (canEditInventory || isAdminAllStores) ? (
-            <Button 
-              variant="outline" 
-              onClick={() => exportFile("excel")}
-              className={`hidden sm:flex gap-2 rounded-xl font-bold h-11 ${theme === 'dark' ? 'bg-gray-900 border-gray-800 text-white hover:bg-gray-800' : 'bg-white hover:bg-gray-50'}`}
-            >
-              <Download className="w-4 h-4" />
-              Export
-            </Button>
-          ) : (
-            <TooltipProvider>
-              <Tooltip>
-                <TooltipTrigger asChild>
-                  <Button disabled variant="outline" className={`hidden sm:flex gap-2 rounded-xl font-bold h-11 ${theme === 'dark' ? 'bg-gray-900 border-gray-800 text-gray-500' : 'bg-white text-gray-400'}`}>
-                    <Download className="w-4 h-4" />
-                    Export
-                  </Button>
-                </TooltipTrigger>
-                <TooltipContent>Switch to a specific store to export</TooltipContent>
-              </Tooltip>
-            </TooltipProvider>
-          )}
           {!isGlobalView && canEditInventory ? (
-            <Button onClick={() => setAddCatOpen(true)} className="bg-indigo-600 hover:bg-indigo-700 text-white gap-2 h-11 px-6 rounded-xl font-black shadow-lg shadow-indigo-100">
+            <Button 
+              onClick={() => setIsAddProductOpen(true)}
+              className="bg-indigo-600 hover:bg-indigo-700 text-white gap-2 h-11 px-6 rounded-xl font-black shadow-lg shadow-indigo-100"
+            >
               <Plus className="w-4 h-4" />
-              Add Category
+              Add Product
             </Button>
           ) : (
             <TooltipProvider>
@@ -464,6 +526,28 @@ export function InventoryPage() {
                 <TooltipTrigger asChild>
                   <Button disabled className="bg-gray-100 text-gray-400 border-none h-11 px-6 rounded-xl font-black cursor-not-allowed">
                     <Plus className="w-4 h-4" />
+                    Add Product
+                  </Button>
+                </TooltipTrigger>
+                <TooltipContent>Switch to a specific store to add products</TooltipContent>
+              </Tooltip>
+            </TooltipProvider>
+          )}
+          {!isGlobalView && canEditInventory ? (
+            <Button 
+              variant="outline" 
+              onClick={() => setAddCatOpen(true)}
+              className={`hidden sm:flex gap-2 rounded-xl font-bold h-11 ${theme === 'dark' ? 'bg-gray-900 border-gray-800 text-white hover:bg-gray-800' : 'bg-white hover:bg-gray-50'}`}
+            >
+              <Tag className="w-4 h-4" />
+              Add Category
+            </Button>
+          ) : (
+            <TooltipProvider>
+              <Tooltip>
+                <TooltipTrigger asChild>
+                  <Button disabled variant="outline" className={`hidden sm:flex gap-2 rounded-xl font-bold h-11 ${theme === 'dark' ? 'bg-gray-900 border-gray-800 text-gray-500' : 'bg-white text-gray-400'}`}>
+                    <Tag className="w-4 h-4" />
                     Add Category
                   </Button>
                 </TooltipTrigger>
@@ -475,29 +559,60 @@ export function InventoryPage() {
       </div>
 
       {/* KPI Cards */}
-      <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
+      <div className="grid grid-cols-2 lg:grid-cols-5 gap-4">
+        <Card className="bento-card bento-card-hover border-none shadow-none">
+          <CardContent className="p-5">
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-on-surface-variant">Total Products</p>
+                <KPIValue value={inventoryArray.length} className="font-display text-3xl font-extrabold text-on-surface mt-1" animate />
+              </div>
+              <div className="w-10 h-10 bg-primary-fixed rounded-xl flex items-center justify-center shrink-0">
+                <Package className="w-5 h-5 text-primary-container" />
+              </div>
+            </div>
+            <p className="mt-3 text-xs font-medium text-on-surface-variant">{categories.length} categories available</p>
+          </CardContent>
+        </Card>
+
+        <Card className="bento-card bento-card-hover border-none shadow-none">
+          <CardContent className="p-5">
+            <div className="flex items-start justify-between">
+              <div>
+                <p className="text-[11px] font-semibold uppercase tracking-widest text-on-surface-variant">Categories</p>
+                <KPIValue value={categories.length} className="font-display text-3xl font-extrabold text-on-surface mt-1" animate />
+              </div>
+              <div className="w-10 h-10 bg-secondary-container/40 rounded-xl flex items-center justify-center shrink-0">
+                <Tag className="w-5 h-5 text-on-secondary-container" />
+              </div>
+            </div>
+            <p className="mt-3 text-xs font-medium text-on-surface-variant">
+              {activeCategories} active · {unusedCategories} unused
+            </p>
+          </CardContent>
+        </Card>
+
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
-              <Card 
-                className={`border-gray-200 shadow-sm cursor-pointer transition-all hover:ring-2 hover:ring-indigo-500/20 ${quickFilter === "in-stock" ? "ring-2 ring-indigo-500" : ""} ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-white'}`}
+              <Card
+                className={`bento-card bento-card-hover border-none shadow-none cursor-pointer ${quickFilter === "in-stock" ? "ring-2 ring-primary-container" : ""}`}
                 onClick={() => setQuickFilter("in-stock")}
               >
-                <CardContent className="pt-6">
-                  <div className="flex items-center justify-between">
+                <CardContent className="p-5">
+                  <div className="flex items-start justify-between">
                     <div>
-                      <p className="text-sm font-medium text-gray-600">Stock on Hand</p>
-                      <KPIValue value={metrics.stockOnHand} formatter={(v) => v.toLocaleString()} className="text-gray-900 mt-1" animate />
+                      <p className="text-[11px] font-semibold uppercase tracking-widest text-on-surface-variant">Stock on Hand</p>
+                      <KPIValue value={metrics.stockOnHand} formatter={(v) => v.toLocaleString()} className="font-display text-3xl font-extrabold text-on-surface mt-1" animate />
                     </div>
-                    <div className="w-12 h-12 bg-green-50 rounded-xl flex items-center justify-center">
-                      <CheckCircle2 className="w-6 h-6 text-green-600" />
+                    <div className="w-10 h-10 bg-tertiary-fixed/40 rounded-xl flex items-center justify-center shrink-0">
+                      <CheckCircle2 className="w-5 h-5 text-[#00A651]" />
                     </div>
                   </div>
-                  <div className="mt-4 flex items-center gap-2 text-sm text-gray-500">
-                    <TrendingDown className="w-4 h-4 text-red-600" />
-                    <span className="text-red-600 font-medium">-3%</span>
-                    <span>vs last week</span>
-                  </div>
+                  <p className="mt-3 flex items-center gap-1.5 text-xs font-medium text-on-surface-variant">
+                    <span className="font-semibold text-on-surface">{inventoryArray.length}</span>
+                    products tracked
+                  </p>
                 </CardContent>
               </Card>
             </TooltipTrigger>
@@ -508,24 +623,26 @@ export function InventoryPage() {
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
-              <Card 
-                className={`border-gray-200 shadow-sm cursor-pointer transition-all hover:ring-2 hover:ring-indigo-500/20 ${quickFilter === "low-stock" ? "ring-2 ring-indigo-500" : ""} ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-white'}`}
+              <Card
+                className={`bento-card bento-card-hover border-none shadow-none cursor-pointer ${quickFilter === "low-stock" ? "ring-2 ring-primary-container" : ""}`}
                 onClick={() => setQuickFilter("low-stock")}
               >
-                <CardContent className="pt-6">
-                  <div className="flex items-center justify-between">
+                <CardContent className="p-5">
+                  <div className="flex items-start justify-between">
                     <div>
-                      <p className="text-sm font-medium text-gray-600">Low Stock</p>
-                      <KPIValue value={metrics.low} className="text-gray-900 mt-1" animate />
+                      <p className="text-[11px] font-semibold uppercase tracking-widest text-on-surface-variant">Low Stock</p>
+                      <KPIValue value={metrics.low} className="font-display text-3xl font-extrabold text-on-surface mt-1" animate />
                     </div>
-                    <div className="w-12 h-12 bg-yellow-50 rounded-xl flex items-center justify-center">
-                      <AlertTriangle className="w-6 h-6 text-yellow-600" />
+                    <div className="w-10 h-10 bg-[#fff4e0] rounded-xl flex items-center justify-center shrink-0">
+                      <AlertTriangle className="w-5 h-5 text-[#b26a00]" />
                     </div>
                   </div>
-                  <div className="mt-4 flex items-center gap-2 text-sm text-yellow-700">
-                    <span className="font-medium">10–29 units</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </div>
+                  <p className="mt-3 flex items-center gap-1.5 text-xs font-medium text-on-surface-variant">
+                    <span className="font-semibold text-[#b26a00]">
+                      {metrics.low + metrics.critical}
+                    </span>
+                    {metrics.low + metrics.critical === 1 ? "item" : "items"} at or below reorder point
+                  </p>
                 </CardContent>
               </Card>
             </TooltipTrigger>
@@ -536,55 +653,24 @@ export function InventoryPage() {
         <TooltipProvider>
           <Tooltip>
             <TooltipTrigger asChild>
-              <Card 
-                className={`border-gray-200 shadow-sm cursor-pointer transition-all hover:ring-2 hover:ring-indigo-500/20 ${quickFilter === "critical" ? "ring-2 ring-indigo-500" : ""} ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-white'}`}
-                onClick={() => setQuickFilter("critical")}
-              >
-                <CardContent className="pt-6">
-                  <div className="flex items-center justify-between">
-                    <div>
-                      <p className="text-sm font-medium text-gray-600">Critical</p>
-                      <KPIValue value={metrics.critical} className="text-gray-900 mt-1" animate />
-                    </div>
-                    <div className={`w-12 h-12 ${metrics.critical > 0 ? "bg-red-50" : "bg-gray-50"} rounded-xl flex items-center justify-center`}>
-                      <AlertTriangle className={`w-6 h-6 ${metrics.critical > 0 ? "text-red-600 animate-pulse" : "text-gray-400"}`} />
-                    </div>
-                  </div>
-                  <div className="mt-4 flex items-center gap-2 text-sm">
-                    {metrics.critical > 0 ? (
-                      <span className="text-red-600 font-bold">Urgent Attention</span>
-                    ) : (
-                      <span className="text-gray-500">All Healthy</span>
-                    )}
-                  </div>
-                </CardContent>
-              </Card>
-            </TooltipTrigger>
-            <TooltipContent>Critical: &lt;10 units</TooltipContent>
-          </Tooltip>
-        </TooltipProvider>
-
-        <TooltipProvider>
-          <Tooltip>
-            <TooltipTrigger asChild>
-              <Card 
-                className={`border-gray-200 shadow-sm cursor-pointer transition-all hover:ring-2 hover:ring-indigo-500/20 ${quickFilter === "expiring" ? "ring-2 ring-indigo-500" : ""} ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-white'}`}
+              <Card
+                className={`bento-card bento-card-hover border-none shadow-none cursor-pointer ${quickFilter === "expiring" ? "ring-2 ring-primary-container" : ""}`}
                 onClick={() => setQuickFilter("expiring")}
               >
-                <CardContent className="pt-6">
-                  <div className="flex items-center justify-between">
+                <CardContent className="p-5">
+                  <div className="flex items-start justify-between">
                     <div>
-                      <p className="text-sm font-medium text-gray-600">Expiring Stock</p>
-                      <KPIValue value={metrics.expiring} className="text-gray-900 mt-1" animate />
+                      <p className="text-[11px] font-semibold uppercase tracking-widest text-on-surface-variant">Expiring Stock</p>
+                      <KPIValue value={metrics.expiring} className="font-display text-3xl font-extrabold text-on-surface mt-1" animate />
                     </div>
-                    <div className="w-12 h-12 bg-orange-50 rounded-xl flex items-center justify-center">
-                      <AlertTriangle className="w-6 h-6 text-orange-600" />
+                    <div className="w-10 h-10 bg-error-container/50 rounded-xl flex items-center justify-center shrink-0">
+                      <AlertTriangle className="w-5 h-5 text-error" />
                     </div>
                   </div>
-                  <div className="mt-4 flex items-center gap-2 text-sm text-orange-700">
-                    <span className="font-medium">Next 30 days</span>
-                    <ArrowRight className="w-4 h-4" />
-                  </div>
+                  <p className="mt-3 flex items-center gap-1.5 text-xs font-medium text-on-surface-variant">
+                    <span className="font-semibold text-error">Next 30 days</span>
+                    <ArrowRight className="w-3.5 h-3.5" />
+                  </p>
                 </CardContent>
               </Card>
             </TooltipTrigger>
@@ -616,74 +702,72 @@ export function InventoryPage() {
 
       {/* Filter Tabs & Search Bar */}
       <div className="flex flex-col lg:flex-row lg:items-center justify-between gap-4">
-        <div className={`flex items-center gap-1 p-1 rounded-lg w-fit ${theme === 'dark' ? 'bg-gray-900' : 'bg-gray-100'}`}>
-          <Button
-            variant={quickFilter === "all" ? "secondary" : "ghost"}
-            size="sm"
-            className={`px-4 rounded-md ${quickFilter === "all" ? (theme === 'dark' ? "bg-gray-800" : "bg-white shadow-sm") : ""}`}
-            onClick={() => setQuickFilter("all")}
-          >
-            All
-          </Button>
-          <Button
-            variant={quickFilter === "in-stock" ? "secondary" : "ghost"}
-            size="sm"
-            className={`px-4 rounded-md ${quickFilter === "in-stock" ? (theme === 'dark' ? "bg-gray-800" : "bg-white shadow-sm") : ""}`}
-            onClick={() => setQuickFilter("in-stock")}
-          >
-            In Stock
-          </Button>
-          <Button
-            variant={quickFilter === "low-stock" ? "secondary" : "ghost"}
-            size="sm"
-            className={`px-4 rounded-md ${quickFilter === "low-stock" ? (theme === 'dark' ? "bg-gray-800" : "bg-white shadow-sm") : ""}`}
-            onClick={() => setQuickFilter("low-stock")}
-          >
-            Low Stock
-          </Button>
-          <Button
-            variant={quickFilter === "critical" ? "secondary" : "ghost"}
-            size="sm"
-            className={`px-4 rounded-md ${quickFilter === "critical" ? (theme === 'dark' ? "bg-gray-800" : "bg-white shadow-sm") : ""}`}
-            onClick={() => setQuickFilter("critical")}
-          >
-            Critical
-          </Button>
-          <Button
-            variant={quickFilter === "expiring" ? "secondary" : "ghost"}
-            size="sm"
-            className={`px-4 rounded-md ${quickFilter === "expiring" ? (theme === 'dark' ? "bg-gray-800" : "bg-white shadow-sm") : ""}`}
-            onClick={() => setQuickFilter("expiring")}
-          >
-            Expiring
-          </Button>
+        <div className={`flex items-center gap-1 p-1 rounded-xl w-fit ${theme === 'dark' ? 'bg-gray-900' : 'bg-surface-container'}`}>
+          {[
+            { id: "all", label: "All" },
+            { id: "low-stock", label: "Low Stock" },
+            { id: "critical", label: "Critical" },
+            { id: "expiring", label: "Expiring" },
+          ].map((tab) => (
+            <Button
+              key={tab.id}
+              variant="ghost"
+              size="sm"
+              className={`px-4 rounded-lg font-semibold transition-all ${
+                quickFilter === tab.id
+                  ? "bg-surface-container-lowest text-primary-container shadow-sm"
+                  : "text-on-surface-variant hover:bg-surface-container-low"
+              }`}
+              onClick={() => setQuickFilter(tab.id as typeof quickFilter)}
+            >
+              {tab.label}
+            </Button>
+          ))}
         </div>
 
         <div className="flex flex-col sm:flex-row items-center gap-3">
           <div className="relative w-full sm:w-80">
-            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-gray-400" />
+            <Search className="absolute left-3 top-1/2 -translate-y-1/2 w-4 h-4 text-on-surface-variant" />
             <Input
               placeholder="Search product name, SKU, or category..."
               value={searchTerm}
               onChange={(e) => setSearchTerm(e.target.value)}
-              className={`pl-9 border-none ${theme === 'dark' ? 'bg-gray-900 text-white' : 'bg-white border-gray-200'}`}
+              className={`pl-9 border-none rounded-xl ${theme === 'dark' ? 'bg-gray-900 text-white' : 'bg-surface-container-lowest border border-outline-variant/40'}`}
             />
           </div>
-          <div className="flex items-center gap-2 w-full sm:w-auto">
-            <Button
-              variant="outline"
-              className={`gap-2 ${filtersOpen ? "bg-indigo-50 border-indigo-200 text-indigo-700" : ""} ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : ''}`}
-              onClick={() => setFiltersOpen(!filtersOpen)}
-            >
-              <Filter className="w-4 h-4" />
-              Filters
-            </Button>
-          </div>
+          {!isGlobalView && (
+            <DropdownMenu>
+              <DropdownMenuTrigger asChild>
+                <Button
+                  variant="outline"
+                  className={`gap-2 rounded-xl font-bold h-11 shrink-0 ${theme === 'dark' ? 'bg-gray-900 border-gray-800 text-white hover:bg-gray-800' : 'bg-white hover:bg-gray-50'}`}
+                >
+                  <Download className="w-4 h-4" />
+                  Export
+                  <ChevronDown className="w-4 h-4" />
+                </Button>
+              </DropdownMenuTrigger>
+              <DropdownMenuContent align="end" className="rounded-xl p-1.5 w-44">
+                <DropdownMenuItem onClick={() => exportFile("csv")} className="rounded-lg cursor-pointer">
+                  <FileText className="w-4 h-4 mr-2" />
+                  CSV
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => exportFile("excel")} className="rounded-lg cursor-pointer">
+                  <FileSpreadsheet className="w-4 h-4 mr-2" />
+                  Excel
+                </DropdownMenuItem>
+                <DropdownMenuItem onClick={() => exportFile("pdf")} className="rounded-lg cursor-pointer">
+                  <FileText className="w-4 h-4 mr-2" />
+                  PDF
+                </DropdownMenuItem>
+              </DropdownMenuContent>
+            </DropdownMenu>
+          )}
         </div>
       </div>
 
       {/* Table Section */}
-      <Card className={`border-gray-200 shadow-sm relative overflow-hidden ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : 'bg-white'}`}>
+      <Card className={`bento-card border-none shadow-none relative overflow-hidden ${theme === 'dark' ? 'bg-gray-900 border-gray-800' : ''}`}>
         {selectedRows.length > 0 && (
           <div className="absolute top-0 left-0 right-0 h-14 bg-indigo-600 text-white flex items-center px-6 justify-between z-10 animate-in slide-in-from-top duration-200">
             <span className="font-medium">{selectedRows.length} items selected</span>
@@ -734,17 +818,9 @@ export function InventoryPage() {
         )}
         <CardContent className="p-0">
           <div className="overflow-x-auto">
-            <Table>
+            <Table className="table-fixed min-w-[980px] [&_th]:px-6 [&_td]:px-6">
               <TableHeader>
-                <TableRow className={`${theme === 'dark' ? 'bg-gray-800/50 border-gray-800' : 'bg-gray-50/50 border-gray-100'}`}>
-                  <TableHead className="w-12">
-                    <Checkbox 
-                      checked={selectedRows.length === paginatedItems.length && paginatedItems.length > 0}
-                      onCheckedChange={(checked) => {
-                        setSelectedRows(checked ? paginatedItems.map(i => i.id) : []);
-                      }}
-                    />
-                  </TableHead>
+                <TableRow className={`${theme === 'dark' ? 'bg-gray-800/50 hover:!bg-gray-800/50 border-gray-800' : 'bg-surface-container-low hover:!bg-surface-container-low border-outline-variant/30'}`}>
                   <TableHead className="w-16">Image</TableHead>
                   <TableHead className="cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("name")}>
                     <div className="flex items-center gap-1">
@@ -752,33 +828,32 @@ export function InventoryPage() {
                       {sortConfig.key === "name" ? (sortConfig.direction === "asc" ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <ChevronDown className="w-4 h-4 opacity-0 group-hover:opacity-50" />}
                     </div>
                   </TableHead>
-                  <TableHead className="cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("sku")}>
+                  <TableHead className="w-[14%] cursor-pointer hover:text-indigo-600 transition-colors group px-4" onClick={() => handleSort("sku")}>
                     <div className="flex items-center gap-1">
                       SKU
                       {sortConfig.key === "sku" ? (sortConfig.direction === "asc" ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <ChevronDown className="w-4 h-4 opacity-0 group-hover:opacity-50" />}
                     </div>
                   </TableHead>
-                  <TableHead>Category</TableHead>
-                  <TableHead className="w-48 cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("stock")}>
+                  <TableHead className="w-[14%] px-4">Category</TableHead>
+                  <TableHead className="w-[20%] px-4 cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("stock")}>
                     <div className="flex items-center gap-1">
                       Stock Level
                       {sortConfig.key === "stock" ? (sortConfig.direction === "asc" ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <ChevronDown className="w-4 h-4 opacity-0 group-hover:opacity-50" />}
                     </div>
                   </TableHead>
-                  <TableHead>Status</TableHead>
-                  <TableHead className="text-right cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("price")}>
-                    <div className="flex items-center gap-1 justify-end">
+                  <TableHead className="w-[14%] text-right">Status</TableHead>
+                  <TableHead className="w-[12%] text-right cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("price")}>
+                    <div className="flex items-center justify-end gap-1">
                       Price
                       {sortConfig.key === "price" ? (sortConfig.direction === "asc" ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <ChevronDown className="w-4 h-4 opacity-0 group-hover:opacity-50" />}
                     </div>
                   </TableHead>
-                  <TableHead className="w-12"></TableHead>
                 </TableRow>
               </TableHeader>
               <TableBody>
                 {paginatedItems.length === 0 ? (
                   <TableRow>
-                    <TableCell colSpan={9} className="h-64 text-center">
+                    <TableCell colSpan={7} className="h-64 text-center">
                       <div className="flex flex-col items-center justify-center text-gray-500">
                         <Package className="w-12 h-12 mb-4 opacity-20" />
                         <p className="text-lg font-medium">No products found</p>
@@ -797,27 +872,22 @@ export function InventoryPage() {
                       <TableRow 
                         key={item.id} 
                         id={`product-row-${item.id}`}
-                        className={`group transition-all duration-500 ${isPinned ? (theme === 'dark' ? "bg-indigo-950/20" : "bg-indigo-50/30") : ""} ${isHighlighted ? (theme === 'dark' ? 'ring-2 ring-indigo-500 bg-indigo-500/10 shadow-[0_0_15px_rgba(99,102,241,0.3)]' : 'ring-2 ring-indigo-500 bg-indigo-50 shadow-[0_0_15px_rgba(99,102,241,0.2)] scale-[1.01]') : ""} ${theme === 'dark' ? 'hover:bg-gray-800/50 border-gray-800' : 'hover:bg-gray-50/80 border-gray-100'}`}
+                        onClick={() => setViewItemId(item.id)}
+                        className={`group cursor-pointer transition-all duration-500 ${isPinned ? (theme === 'dark' ? "bg-indigo-950/20" : "bg-indigo-50/30") : ""} ${isHighlighted ? (theme === 'dark' ? 'ring-2 ring-indigo-500 bg-indigo-500/10 shadow-[0_0_15px_rgba(99,102,241,0.3)]' : 'ring-2 ring-indigo-500 bg-indigo-50 shadow-[0_0_15px_rgba(99,102,241,0.2)] scale-[1.01]') : ""} ${theme === 'dark' ? 'hover:bg-gray-800/50 border-gray-800' : 'hover:bg-surface-container-low border-outline-variant/20'}`}
                       >
                         <TableCell>
-                          <Checkbox 
-                            checked={selectedRows.includes(item.id)}
-                            onCheckedChange={(checked) => {
-                              setSelectedRows(prev => checked ? [...prev, item.id] : prev.filter(id => id !== item.id));
-                            }}
+                          <InventoryThumb
+                            name={item.name}
+                            imageUrl={item.imageUrl}
+                            pinned={isPinned}
                           />
                         </TableCell>
-                        <TableCell>
-                          <div className={`w-10 h-10 rounded-lg flex items-center justify-center overflow-hidden border ${theme === 'dark' ? 'bg-gray-800 border-gray-700' : 'bg-gray-100 border-gray-200'}`}>
-                            {isPinned ? <Pin className="w-4 h-4 text-indigo-600" /> : <span className="text-gray-400 font-bold text-lg">{item.name[0]}</span>}
-                          </div>
-                        </TableCell>
-                        <TableCell className={`font-medium ${theme === 'dark' ? 'text-gray-200' : 'text-gray-900'}`}>{item.name}</TableCell>
-                        <TableCell className="text-gray-500 font-mono text-xs">{item.sku}</TableCell>
-                        <TableCell>
+                        <TableCell className={`font-medium px-4 ${theme === 'dark' ? 'text-gray-200' : 'text-gray-900'}`}>{item.name}</TableCell>
+                        <TableCell className="px-4 text-gray-500 font-mono text-xs">{item.sku}</TableCell>
+                        <TableCell className="px-4">
                           <Badge variant="outline" className={`font-normal ${theme === 'dark' ? 'border-gray-700 text-gray-400' : 'border-gray-200'}`}>{item.category}</Badge>
                         </TableCell>
-                        <TableCell>
+                        <TableCell className="px-4">
                           <div className="space-y-1.5">
                             <div className="flex items-center justify-between text-xs font-medium">
                               <span className={theme === 'dark' ? 'text-gray-300' : 'text-gray-900'}>{item.stock} units</span>
@@ -826,57 +896,10 @@ export function InventoryPage() {
                             <Progress value={stockPercent} className={`h-1.5 ${theme === 'dark' ? 'bg-gray-800' : 'bg-gray-100'}`} indicatorClassName={stockColor} />
                           </div>
                         </TableCell>
-                        <TableCell>{getStatusBadge(item)}</TableCell>
-                        <TableCell className="text-right font-black text-indigo-600">{formatCurrency(item.price)}</TableCell>
                         <TableCell>
-                          <div className="flex items-center justify-end">
-                            <DropdownMenu>
-                              <DropdownMenuTrigger asChild>
-                                <Button variant="ghost" size="icon" className="h-8 w-8 opacity-0 group-hover:opacity-100" title="Actions" aria-label="Actions">
-                                  <MoreVertical className="w-4 h-4" />
-                                </Button>
-                              </DropdownMenuTrigger>
-                              <DropdownMenuContent align="end" className={`w-48 ${theme === 'dark' ? 'bg-gray-900 border-gray-800 text-white' : 'bg-slate-900 text-white border-slate-700'}`}>
-                                <DropdownMenuItem onClick={() => setViewItemId(item.id)} className="gap-2">
-                                  <ExternalLink className="w-4 h-4" /> View Details
-                                </DropdownMenuItem>
-                                {canEditInventory && (
-                                  <DropdownMenuItem onClick={() => { setEditStockItemId(item.id); setEditStockQty(1); }} className="gap-2">
-                                    <Plus className="w-4 h-4" /> Edit Stock
-                                  </DropdownMenuItem>
-                                )}
-                                {canEditInventory && (
-                                  <DropdownMenuItem onClick={() => { setEditPriceItemId(item.id); setEditPriceValue(String(item.price)); }} className="gap-2">
-                                    <Tag className="w-4 h-4" /> Edit Price
-                                  </DropdownMenuItem>
-                                )}
-                                {canEditInventory && (
-                                  <DropdownMenuItem 
-                                    onClick={() => {
-                                      const next = new Set(pinnedItems);
-                                      if (next.has(item.id)) next.delete(item.id);
-                                      else next.add(item.id);
-                                      setPinnedItems(next);
-                                    }} 
-                                    className="gap-2"
-                                  >
-                                    <Pin className="w-4 h-4" /> {isPinned ? "Unpin" : "Pin to Top"}
-                                  </DropdownMenuItem>
-                                )}
-                                {canEditInventory && (
-                                  <DropdownMenuItem onClick={() => downloadProductQrCode(item, `${item.name.replace(/\s+/g, "-").toLowerCase()}-qr.svg`)} className="gap-2">
-                                    <QrCode className="w-4 h-4" /> Generate QR Code
-                                  </DropdownMenuItem>
-                                )}
-                                {canEditInventory && (
-                                  <DropdownMenuItem className="text-red-600 gap-2" onClick={() => setDeleteItemId(item.id)}>
-                                    <Trash2 className="w-4 h-4" /> Delete
-                                  </DropdownMenuItem>
-                                )}
-                              </DropdownMenuContent>
-                            </DropdownMenu>
-                          </div>
+                          <div className="flex justify-end">{getStatusBadge(item)}</div>
                         </TableCell>
+                        <TableCell className={`text-right font-semibold tabular-nums ${theme === 'dark' ? 'text-gray-200' : 'text-black'}`}>{formatCurrency(item.price)}</TableCell>
                       </TableRow>
                     );
                   })
@@ -987,7 +1010,10 @@ export function InventoryPage() {
 
       {/* View Details Modal */}
       <Dialog open={viewItemId !== null} onOpenChange={(o) => !o && setViewItemId(null)}>
-        <DialogContent className="bg-slate-900 text-white border-slate-700 sm:max-w-md">
+        <DialogContent className="bg-surface text-on-surface border-outline-variant/40 sm:max-w-md [&_[data-slot='dialog-close']]:hidden">
+          <DialogClose className="absolute top-4 right-4 h-8 w-8 rounded-full bg-gray-100 border border-gray-200 flex items-center justify-center text-gray-700 hover:bg-red-50 hover:text-red-600 hover:border-red-200 transition-colors">
+            <X className="w-4 h-4" />
+          </DialogClose>
           <DialogHeader>
             <DialogTitle className="text-xl font-bold">Product Details</DialogTitle>
           </DialogHeader>
@@ -995,39 +1021,36 @@ export function InventoryPage() {
             <div className="space-y-4 py-4">
               <div className="grid grid-cols-2 gap-4">
                 <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wider">Name</p>
+                  <p className="text-xs text-on-surface-variant uppercase tracking-wider">Name</p>
                   <p className="text-lg font-medium">{selectedView.name}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wider">SKU</p>
+                  <p className="text-xs text-on-surface-variant uppercase tracking-wider">SKU</p>
                   <p className="text-lg font-medium font-mono">{selectedView.sku}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wider">Category</p>
+                  <p className="text-xs text-on-surface-variant uppercase tracking-wider">Category</p>
                   <p className="text-lg font-medium">{selectedView.category}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wider">Current Stock</p>
+                  <p className="text-xs text-on-surface-variant uppercase tracking-wider">Current Stock</p>
                   <p className="text-lg font-medium">{selectedView.stock} units</p>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wider">Price</p>
-                  <p className="text-lg font-medium font-bold text-indigo-400">{formatCurrency(selectedView.price)}</p>
+                  <p className="text-xs text-on-surface-variant uppercase tracking-wider">Price</p>
+                  <p className={`text-lg font-medium font-bold ${theme === 'dark' ? 'text-gray-200' : 'text-black'}`}>{formatCurrency(selectedView.price)}</p>
                 </div>
                 <div>
-                  <p className="text-xs text-slate-400 uppercase tracking-wider">Reorder Point</p>
+                  <p className="text-xs text-on-surface-variant uppercase tracking-wider">Reorder Point</p>
                   <p className="text-lg font-medium">{selectedView.reorderPoint} units</p>
                 </div>
               </div>
-              <div className="pt-4 border-t border-slate-800">
-                <p className="text-xs text-slate-400 uppercase tracking-wider">Created At</p>
+              <div className="pt-4 border-t border-outline-variant/40">
+                <p className="text-xs text-on-surface-variant uppercase tracking-wider">Created At</p>
                 <p className="text-sm">{new Date(selectedView.createdAt).toLocaleString()}</p>
               </div>
             </div>
           )}
-          <DialogFooter>
-            <Button className="w-full bg-indigo-600 hover:bg-indigo-700" onClick={() => setViewItemId(null)}>Close</Button>
-          </DialogFooter>
         </DialogContent>
       </Dialog>
 
@@ -1159,6 +1182,42 @@ export function InventoryPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
+
+      {/* Add Product Modal */}
+      <AddProductModal
+        isOpen={isAddProductOpen}
+        onClose={() => setIsAddProductOpen(false)}
+        onSave={async (data) => {
+          const imageUrl = await fetchProductImage(data.name);
+          addProduct({
+            name: data.name,
+            sku: data.sku,
+            price: data.price,
+            category: data.category,
+            stock: data.stock,
+            reorderPoint: data.reorderPoint,
+            createdAt: new Date().toISOString(),
+            manufacturedDate: data.manufacturedDate,
+            expiryDate: data.expiryDate,
+            costPrice: data.costPrice,
+            supplier: data.supplier,
+            barcode: data.barcode,
+            imageUrl,
+            storeId: currentStore.id,
+          });
+          if (currentUser?.role !== "Admin") {
+            addNotification({
+              id: `notif-product-${Date.now()}`,
+              type: "info",
+              title: "New Product Added",
+              message: `${currentUser?.name || "A user"} added "${data.name}" to ${currentStore.name}.`,
+              timestamp: new Date().toISOString(),
+              read: false,
+              link: "/inventory",
+            });
+          }
+        }}
+      />
 
       {/* Manage Categories Modal */}
       <Dialog open={addCatOpen} onOpenChange={setAddCatOpen}>
@@ -1299,6 +1358,6 @@ export function InventoryPage() {
           </DialogFooter>
         </DialogContent>
       </Dialog>
-    </div>
+    </Stagger>
   );
 }

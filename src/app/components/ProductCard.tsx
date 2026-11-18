@@ -1,14 +1,20 @@
-import React from "react";
-import { motion, useReducedMotion } from "framer-motion";
-import { fadeInUp, hoverLift } from "../../animations/variants";
+import { useState } from "react";
+import { motion } from "framer-motion";
+import { fadeInUp } from "../../animations/variants";
 import { Card, CardContent } from "./ui/card";
 import { Badge } from "./ui/badge";
 import { Button } from "./ui/button";
 import { Progress } from "./ui/progress";
-import { Plus } from "lucide-react";
+import { Plus, ShoppingCart } from "lucide-react";
+import {
+  buildProductImageUrl,
+  placeholderProductImage,
+} from "../../lib/productImage";
 
 type Product = {
-  id: number;
+  // Backend ids are UUID strings. Declaring this as `number` made every
+  // `cart[id]` lookup type-inconsistent with the Record<string, number> cart.
+  id: string;
   name: string;
   price: number;
   stock: number;
@@ -19,69 +25,78 @@ type Product = {
 type Props = {
   product: Product;
   inCart?: number;
-  onOpenQty: (id: number) => void;
+  onAdd: (id: string) => void;
 };
 
-export function ProductCard({ product, inCart = 0, onOpenQty }: Props) {
-  const stockStatus = product.stock < 10 ? "critical" : product.stock < 30 ? "low" : "healthy";
-  const imgSrc =
-    product.imageUrl ||
-    `https://placehold.co/200x200/4f46e5/ffffff?text=${product.name[0]}`;
+export function ProductCard({ product, inCart = 0, onAdd }: Props) {
+  const [imgFailed, setImgFailed] = useState(false);
+  const stockStatus =
+    product.stock < 10 ? "critical" : product.stock < 30 ? "low" : "healthy";
+  // Prefer the stored photo; generate one for products saved before images
+  // existed. If the generator is unreachable, fall back to a plain placeholder.
+  const imgSrc = imgFailed
+    ? placeholderProductImage(product.name)
+    : product.imageUrl || buildProductImageUrl(product.name);
 
   return (
     <motion.div
       variants={fadeInUp}
       initial="hidden"
       animate="visible"
-      className="cursor-pointer"
+      className="cursor-pointer w-full"
     >
-      <motion.div
-        variants={hoverLift}
-        initial="rest"
-        whileHover="hover"
-        className="rounded-2xl"
-      >
-        <Card
-          className={`group border-gray-200 shadow-sm hover:shadow-md hover:border-indigo-200 transition-all relative overflow-hidden rounded-2xl flex flex-col ${product.stock === 0 ? "opacity-60" : ""}`}
-          onClick={() => product.stock > 0 && onOpenQty(product.id)}
+      <Card
+          className={`group border-outline-variant/40 shadow-sm hover:shadow-md hover:border-primary-container/40 transition-all relative overflow-hidden rounded-2xl flex flex-col ${product.stock === 0 ? "opacity-60" : ""}`}
+          onClick={() => product.stock > 0 && onAdd(product.id)}
         >
-      {inCart > 0 && (
-        <div className="absolute top-2 right-2 z-10 w-8 h-8 bg-indigo-600 text-white rounded-full flex items-center justify-center font-black text-xs shadow-lg ring-4 ring-white">
-          {inCart}
-        </div>
-      )}
+          {inCart > 0 && (
+            <div className="absolute top-2 right-2 z-10 w-8 h-8 bg-primary-fixed text-primary-container rounded-full flex items-center justify-center font-black text-xs shadow-lg ring-4 ring-surface-container-lowest">
+              {inCart}
+            </div>
+          )}
 
-      <div className="aspect-square bg-gray-100 flex items-center justify-center overflow-hidden relative">
-        <img
-          src={imgSrc}
-          alt={product.name}
-          className="w-full h-full object-cover group-hover:scale-105 transition-transform duration-300"
-        />
-        <div className="absolute inset-0 bg-black/0 group-hover:bg-black/5 transition-colors" />
-        {product.stock === 0 && (
-          <div className="absolute inset-0 bg-gray-900/30 backdrop-blur-[2px] flex items-center justify-center">
-            <Badge variant="destructive" className="px-3 py-1 text-xs font-black uppercase tracking-widest shadow-xl">
-              Out of Stock
-            </Badge>
+          <div className="aspect-[5/4] bg-surface-container flex items-center justify-center overflow-hidden relative">
+            <img
+              src={imgSrc}
+              alt={product.name}
+              loading="lazy"
+              onError={() => setImgFailed(true)}
+              className="w-full h-full object-cover scale-[1.2] group-hover:scale-[1.26] transition-transform duration-300"
+            />
+            <div className="absolute inset-0 bg-black/0 group-hover:bg-black/5 transition-colors" />
+            {product.stock === 0 && (
+              <div className="absolute inset-0 bg-gray-900/30 backdrop-blur-[2px] flex items-center justify-center">
+                <Badge
+                  variant="destructive"
+                  className="px-3 py-1 text-xs font-black uppercase tracking-widest shadow-xl"
+                >
+                  Out of Stock
+                </Badge>
+              </div>
+            )}
+            {product.stock > 0 && product.stock < 10 && (
+              <div className="absolute top-3 left-3">
+                <Badge variant="destructive" className="text-[10px]">
+                  Low Stock
+                </Badge>
+              </div>
+            )}
           </div>
-        )}
-        {product.stock > 0 && product.stock < 10 && (
-          <div className="absolute top-3 left-3">
-            <Badge variant="destructive" className="text-[10px]">Low Stock</Badge>
-          </div>
-        )}
-      </div>
 
-      <CardContent className="p-4 flex-1 flex flex-col justify-between">
-        <div>
-          <h3 className="font-bold text-gray-900 line-clamp-2 leading-tight h-10 mb-1">{product.name}</h3>
-          <p className="text-[10px] text-gray-400 font-mono uppercase tracking-widest">{product.sku}</p>
-        </div>
+          <CardContent className="p-4 flex-1 flex flex-col gap-3">
+            <div className="min-h-[3.3rem]">
+              <h3 className="font-bold text-gray-900 line-clamp-2 leading-tight">
+                {product.name}
+              </h3>
+              <p className="text-[10px] font-medium text-on-surface-variant truncate mt-0.5">
+                {product.sku}
+              </p>
+            </div>
 
-        <div className="mt-4 space-y-3">
-          <div className="flex items-end justify-between">
-            <p className="text-xl font-black text-indigo-600">₦{product.price.toFixed(2)}</p>
-            <div className="text-right">
+            <div className="flex items-end justify-between">
+              <p className="text-xl font-black text-gray-900">
+                ₦{product.price.toFixed(2)}
+              </p>
               <p
                 className={`text-[10px] font-bold uppercase ${
                   stockStatus === "critical"
@@ -94,35 +109,36 @@ export function ProductCard({ product, inCart = 0, onOpenQty }: Props) {
                 {product.stock} in stock
               </p>
             </div>
-          </div>
 
-          <Progress
-            value={(product.stock / 150) * 100}
-            className={`h-1.5 ${
-              stockStatus === "critical"
-                ? "[&>div]:bg-red-500"
-                : stockStatus === "low"
-                ? "[&>div]:bg-orange-500"
-                : "[&>div]:bg-green-500"
-            }`}
-          />
-        </div>
-      </CardContent>
+            <Progress
+              value={(product.stock / 150) * 100}
+              className={`h-1.5 ${
+                stockStatus === "critical"
+                  ? "[&>div]:bg-red-500"
+                  : stockStatus === "low"
+                  ? "[&>div]:bg-orange-500"
+                  : "[&>div]:bg-green-500"
+              }`}
+            />
 
-      <div className="absolute inset-x-0 bottom-0 p-3 translate-y-full group-hover:translate-y-0 transition-transform duration-300 bg-white/95 backdrop-blur-sm border-t border-gray-100 flex gap-2">
-        <Button
-          className="flex-1 bg-indigo-600 hover:bg-indigo-700 h-10 rounded-xl shadow-lg shadow-indigo-100 font-bold gap-2"
-          disabled={product.stock === 0}
-          onClick={(e) => {
-            e.stopPropagation();
-            onOpenQty(product.id);
-          }}
-        >
-          <Plus className="w-4 h-4" /> Add
-        </Button>
-      </div>
+            <Button
+              className="group/add mt-auto w-full h-10 rounded-xl justify-between bg-surface-container-high hover:bg-surface-container-highest text-on-surface font-bold gap-2 shadow-sm"
+              disabled={product.stock === 0}
+              onClick={(e) => {
+                e.stopPropagation();
+                onAdd(product.id);
+              }}
+            >
+              <span className="flex items-center gap-2">
+                <ShoppingCart className="w-4 h-4" />
+                Add to Cart
+              </span>
+              <span className="w-7 h-7 rounded-full bg-gray-200 text-gray-600 flex items-center justify-center shrink-0 shadow-sm transition-transform duration-700 group-hover/add:rotate-[180deg]">
+                <Plus className="w-4 h-4" />
+              </span>
+            </Button>
+          </CardContent>
         </Card>
-      </motion.div>
     </motion.div>
   );
 }

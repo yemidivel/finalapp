@@ -37,6 +37,7 @@ import {
 import { useStore, type User } from "../state/store";
 import { motion } from "framer-motion";
 import { staggerContainer, fadeInUp } from "../../animations/variants";
+import { Stagger } from "../../animations/Stagger";
 import * as XLSX from "xlsx";
 import { toast } from "sonner";
 
@@ -408,14 +409,14 @@ export default function StaffPage() {
   };
 
   return (
-    <div className={`p-4 md:p-6 space-y-6 min-h-screen ${theme === "dark" ? "bg-gray-900" : "bg-gray-50/30"}`}>
+    <Stagger className={`px-4 md:px-6 pt-2 pb-8 space-y-6 min-h-screen ${theme === "dark" ? "bg-gray-900" : "bg-surface text-on-surface"}`}>
       {/* Page Header */}
       <div className="flex flex-col md:flex-row md:items-center justify-between gap-4">
         <div>
-          <h1 className={`text-xl font-black tracking-tight ${theme === "dark" ? "text-gray-100" : "text-gray-900"}`}>
+          <h1 className={`text-3xl font-black tracking-tight ${theme === "dark" ? "text-gray-100" : "text-gray-900"}`}>
             Staff Management
           </h1>
-          <p className={`text-xs font-medium ${theme === "dark" ? "text-gray-400" : "text-gray-500"}`}>
+          <p className={`text-sm font-medium ${theme === "dark" ? "text-gray-400" : "text-gray-500"}`}>
             Manage attendance and performance for {currentStore.name}
           </p>
         </div>
@@ -456,7 +457,7 @@ export default function StaffPage() {
           <CardContent className="p-4">
             <div className="flex items-center justify-between mb-3">
               <div className={`w-10 h-10 rounded-xl flex items-center justify-center ${theme === "dark" ? "bg-green-500/10" : "bg-green-50"}`}>
-                <CheckCircle2 className={`w-5 h-5 ${theme === "dark" ? "text-green-400" : "text-green-600"}`} />
+                <CheckCircle2 className="w-5 h-5 text-[#00A651]" />
               </div>
               <Badge className={`border-none text-[10px] font-bold ${theme === "dark" ? "bg-green-500/10 text-green-300" : "bg-green-50 text-green-700"}`}>
                 Monthly
@@ -1036,6 +1037,6 @@ export default function StaffPage() {
           )}
         </>
       </Tabs>
-    </div>
+    </Stagger>
   );
 }

@@ -10,7 +10,6 @@ import { ReportsPage } from "./pages/ReportsPage";
 import { NotificationsPage } from "./pages/NotificationsPage";
 import SettingsPage from "./pages/SettingsPage";
 import { PosPage } from "./pages/PosPage";
-import StaffPage from "./pages/StaffPage";
 import { StoresPage } from "./pages/StoresPage";
 import { TeamPage } from "./pages/TeamPage";
 
@@ -30,7 +29,6 @@ export const router = createBrowserRouter([
       { path: "forecasts", Component: ForecastsPage },
       { path: "reports", Component: ReportsPage },
       { path: "notifications", Component: NotificationsPage },
-      { path: "staff", Component: StaffPage },
       { path: "settings", Component: SettingsPage },
     ],
   },

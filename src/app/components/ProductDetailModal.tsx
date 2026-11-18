@@ -96,7 +96,7 @@ export function ProductDetailModal({ isOpen, onClose, product }: ProductDetailMo
                 </div>
               </div>
               <Badge className={`${status.color} px-3 py-1.5 rounded-xl font-black uppercase tracking-widest text-[10px] border flex items-center gap-1.5`}>
-                <StatusIcon className="w-3.5 h-3.5" />
+                <StatusIcon className={`w-3.5 h-3.5 ${status.label === "Healthy" ? "text-[#00A651]" : ""}`} />
                 {status.label}
               </Badge>
             </div>

@@ -19,6 +19,7 @@ import { Building2, ShieldCheck, Sparkles } from "lucide-react";
 export function Onboarding() {
   const {
     users,
+    currentUser,
     addUser,
     addStore,
     loginUser,
@@ -27,7 +28,11 @@ export function Onboarding() {
     setAdminOverview,
   } = useStore();
 
-  const existingAdmin = users.find((u) => u.role === "Admin");
+  // Prefer a real Admin that is already part of the app (the signed-up
+  // account owner) so we never invent a placeholder account.
+  const existingAdmin =
+    users.find((u) => u.role === "Admin") ||
+    (currentUser?.role === "Admin" ? currentUser : undefined);
 
   const [storeName, setStoreName] = useState("");
   const [storeCode, setStoreCode] = useState("");
@@ -43,7 +48,7 @@ export function Onboarding() {
   const [confirmed, setConfirmed] = useState(false);
   const [isConfirmOpen, setIsConfirmOpen] = useState(false);
 
-  const handleSubmit = () => {
+  const handleSubmit = async () => {
     if (!storeName.trim()) {
       toast.error("Please enter your store name");
       return;
@@ -73,8 +78,6 @@ export function Onboarding() {
 
     setSubmitting(true);
 
-    const now = Date.now();
-    const storeId = `S-${now}`;
     const code =
       storeCode.trim() ||
       storeName
@@ -85,8 +88,11 @@ export function Onboarding() {
         .toUpperCase()
         .slice(0, 4) || "STORE";
 
+    // Local shape only — when a session token exists, addStore persists the
+    // store through the backend and returns the REAL DB store record, so the
+    // id used for switching/team assignment matches the database.
     const store: Store = {
-      id: storeId,
+      id: `S-${Date.now()}`,
       name: storeName.trim(),
       code,
       address: address.trim(),
@@ -96,11 +102,10 @@ export function Onboarding() {
       phone: storePhone.trim(),
       email: storeEmail.trim(),
       status: "Active",
-      isAdminStore: true,
     };
 
     const autoAdmin: User = {
-      id: `U-${now}`,
+      id: `U-${Date.now()}`,
       name: "Administrator",
       email: "admin@sellsync.com",
       role: "Admin",
@@ -113,25 +118,31 @@ export function Onboarding() {
     const admin = existingAdmin || autoAdmin;
 
     try {
+      const created = await addStore(store);
+      if (!created) {
+        console.error("Store creation failed (see prior error).");
+        setSubmitting(false);
+        return;
+      }
       if (!existingAdmin) {
         addUser(autoAdmin);
       }
-      addStore(store);
       loginUser(admin);
       updateUser({
         ...admin,
         assignedStoreIds: [
-          ...new Set([...(existingAdmin?.assignedStoreIds || []), storeId]),
+          ...new Set([...(existingAdmin?.assignedStoreIds || []), created.id]),
         ],
       });
-      switchStore(storeId);
+      switchStore(created.id);
       setAdminOverview(true);
       toast.success(
         existingAdmin
-          ? `Store "${store.name}" created successfully`
-          : `Welcome! You are now the Administrator of "${store.name}"`,
+          ? `Store "${created.name}" created successfully`
+          : `Welcome! You are now the Administrator of "${created.name}"`,
       );
-    } catch {
+    } catch (error) {
+      console.error("Onboarding failed:", error);
       toast.error("Something went wrong. Please try again.");
       setSubmitting(false);
     }

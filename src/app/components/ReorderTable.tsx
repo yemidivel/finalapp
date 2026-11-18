@@ -56,7 +56,7 @@ export function ReorderTable({ items, selected, onToggle, onSelectAll }: Reorder
             <Badge className="bg-orange-100 text-orange-700 hover:bg-orange-100 border-none">Monitor</Badge>
             <Popover>
               <PopoverTrigger asChild>
-                <button className="text-gray-400 hover:text-indigo-600 transition-colors" title="Why?">
+                <button className="text-gray-400 hover:text-indigo-600 transition-colors">
                   <Info className="w-3.5 h-3.5" />
                 </button>
               </PopoverTrigger>
@@ -73,7 +73,7 @@ export function ReorderTable({ items, selected, onToggle, onSelectAll }: Reorder
             <Badge variant="destructive" className="border-none">Critical</Badge>
             <Popover>
               <PopoverTrigger asChild>
-                <button className="text-gray-400 hover:text-indigo-600 transition-colors" title="Why?">
+                <button className="text-gray-400 hover:text-indigo-600 transition-colors">
                   <Info className="w-3.5 h-3.5" />
                 </button>
               </PopoverTrigger>

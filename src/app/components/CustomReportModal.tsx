@@ -178,7 +178,7 @@ export function CustomReportModal({ open, onClose }: CustomReportModalProps) {
 
     const dailyMap: Record<string, { revenue: number; orders: number; units: number }> = {};
     const paymentMap: Record<string, number> = {};
-    const productMap: Record<number, { revenue: number; units: number }> = {};
+    const productMap: Record<string, { revenue: number; units: number }> = {};
     const categoryMap: Record<string, { revenue: number; units: number }> = {};
 
     filteredTx.forEach((tx) => {
@@ -192,7 +192,7 @@ export function CustomReportModal({ open, onClose }: CustomReportModalProps) {
       paymentMap[pay] = (paymentMap[pay] || 0) + tx.amount;
 
       tx.items.forEach((it) => {
-        const productId = Number(it.productId);
+        const productId = it.productId;
         const qty = Number(it.qty) || 0;
         const price = Number(it.price) || 0;
         const amount = qty * price;
@@ -218,7 +218,7 @@ export function CustomReportModal({ open, onClose }: CustomReportModalProps) {
 
     const productRows = Object.entries(productMap)
       .map(([id, s]) => {
-        const p = invMap[Number(id)];
+        const p = invMap[id];
         return {
           Product: p?.name || `#${id}`,
           SKU: p?.sku || "N/A",
@@ -927,7 +927,7 @@ export function CustomReportModal({ open, onClose }: CustomReportModalProps) {
               <div className="py-10 space-y-8">
                 <div className="text-center space-y-3">
                   <div className="w-20 h-20 bg-green-50 rounded-[1.75rem] flex items-center justify-center mx-auto shadow-xl shadow-green-100/50">
-                    <CheckCircle2 className="w-10 h-10 text-green-500" />
+                    <CheckCircle2 className="w-10 h-10 text-[#00A651]" />
                   </div>
                   <div>
                     <h3 className="text-2xl font-black text-gray-900 tracking-tight">

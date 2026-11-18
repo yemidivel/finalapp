@@ -3,15 +3,21 @@ import {
   TrendingUp,
   BarChart3,
   Plus,
+  ChevronUp,
+  ChevronDown,
 } from "lucide-react";
-import {
-  Card,
-  CardContent,
-  CardHeader,
-  CardTitle,
-} from "../components/ui/card";
+import { Card, CardContent, CardHeader, CardTitle } from "../components/ui/card";
+import { Stagger } from "../../animations/Stagger";
 import { Badge } from "../components/ui/badge";
 import { Button } from "../components/ui/button";
+import {
+  Table,
+  TableBody,
+  TableCell,
+  TableHead,
+  TableHeader,
+  TableRow,
+} from "../components/ui/table";
 import {
   Select,
   SelectContent,
@@ -37,9 +43,10 @@ import {
   Area,
 } from "recharts";
 import { useMemo, useState } from "react";
-import { useStore } from "../state/store";
+import { useStore, useProductSync } from "../state/store";
 import { QrGeneratorModal } from "../components/QrGeneratorModal";
 import { AddProductModal } from "../components/AddProductModal";
+import { fetchProductImage } from "../../lib/productImage";
 import { ProductDetailModal } from "../components/ProductDetailModal";
 import { QrCode } from "lucide-react";
 import { KPIValue } from "../components/KPIValue";
@@ -57,6 +64,10 @@ export function ProductsPage() {
     canEdit,
     addNotification,
   } = useStore();
+  // Read products from the database (not a login-time snapshot) so this
+  // page stays in sync across Manager and Cashier sessions.
+  useProductSync();
+
   const canEditProducts = canEdit("Products");
   const isGlobalView = currentStore.id === "S-ALL";
 
@@ -74,6 +85,21 @@ export function ProductsPage() {
     useState<any>(null);
   const [selectedProductForDetail, setSelectedProductForDetail] =
     useState<any>(null);
+
+  // Catalog sorting (client-side, mirrors the Inventory page pattern).
+  // The API already returns products in a deterministic database order;
+  // this state lets the user re-order the visible table on demand.
+  const [sortConfig, setSortConfig] = useState<{
+    key: string;
+    direction: "asc" | "desc";
+  }>({ key: "name", direction: "asc" });
+
+  const handleSort = (key: string) => {
+    setSortConfig((prev) => ({
+      key,
+      direction: prev.key === key && prev.direction === "asc" ? "desc" : "asc",
+    }));
+  };
 
   const totalProducts = inventoryArray.length;
   const categoriesCount = categories.length;
@@ -158,7 +184,7 @@ export function ProductsPage() {
   }, [filteredForLine]);
 
   const topProductsByRevenue = useMemo(() => {
-    const revenueByProduct: Record<number, number> = {};
+    const revenueByProduct: Record<string, number> = {};
     for (const t of filteredForBar) {
       for (const it of t.items) {
         revenueByProduct[it.productId] =
@@ -175,8 +201,8 @@ export function ProductsPage() {
 
   const productList = useMemo(() => {
     const today = new Date().toISOString().slice(0, 10);
-    const soldTodayMap: Record<number, number> = {};
-    const totalSoldMap: Record<number, number> = {};
+    const soldTodayMap: Record<string, number> = {};
+    const totalSoldMap: Record<string, number> = {};
 
     for (const t of transactions) {
       const isToday = t.datetime.startsWith(today);
@@ -195,14 +221,42 @@ export function ProductsPage() {
     }));
   }, [inventoryArray, transactions]);
 
+  const sortedProducts = useMemo(() => {
+    const { key, direction } = sortConfig;
+    const rows = [...productList];
+
+    rows.sort((a: any, b: any) => {
+      // Uncategorised products collect at the bottom in both directions.
+      const aEmpty =
+        a[key] === null || a[key] === undefined || a[key] === "";
+      const bEmpty =
+        b[key] === null || b[key] === undefined || b[key] === "";
+      if (aEmpty && bEmpty) return a.name.localeCompare(b.name);
+      if (aEmpty) return 1;
+      if (bEmpty) return -1;
+
+      const aValue = a[key];
+      const bValue = b[key];
+      const result =
+        typeof aValue === "string"
+          ? aValue.localeCompare(bValue)
+          : aValue - bValue;
+      // Stable tie-breaker so equal rows never reshuffle between renders.
+      if (result === 0) return a.name.localeCompare(b.name);
+      return direction === "asc" ? result : -result;
+    });
+
+    return rows;
+  }, [productList, sortConfig]);
+
 
   return (
-    <div className="p-6 space-y-6">
+    <Stagger className="px-6 pt-2 pb-8 space-y-6 min-h-screen bg-surface text-on-surface">
       {/* Page Header */}
       <div className="flex flex-col sm:flex-row sm:items-center justify-between gap-4">
         <div>
           <div className="flex items-center gap-3">
-            <h1 className="text-2xl font-black text-gray-900 tracking-tight">
+            <h1 className="text-3xl font-black tracking-tight text-gray-900 dark:text-white">
               Products
             </h1>
           </div>
@@ -215,7 +269,7 @@ export function ProductsPage() {
         <div className="flex items-center gap-3">
           <Button
             variant="outline"
-            className="gap-2 border-indigo-200 text-indigo-600 hover:bg-indigo-50 rounded-xl h-11 px-6 font-bold"
+            className="gap-2 border-indigo-200 text-indigo-600 hover:bg-primary-fixed rounded-xl h-11 px-6 font-bold"
             onClick={() => {
               setIsGeneratorOpen(true);
             }}
@@ -240,7 +294,7 @@ export function ProductsPage() {
                 <TooltipTrigger asChild>
                   <Button
                     disabled
-                    className="bg-gray-100 text-gray-400 border-none h-11 px-6 rounded-xl font-black cursor-not-allowed"
+                    className="bg-surface-container text-gray-400 border-none h-11 px-6 rounded-xl font-black cursor-not-allowed"
                   >
                     <Plus className="w-4 h-4" />
                     Add Product
@@ -257,7 +311,7 @@ export function ProductsPage() {
 
       {/* Overview Cards */}
       <div className="grid grid-cols-1 sm:grid-cols-2 lg:grid-cols-4 gap-4">
-        <Card className="border-gray-200 shadow-sm">
+        <Card className="border-outline-variant/40 shadow-sm">
           <CardContent className="pt-6">
             <div className="flex items-center justify-between">
               <div>
@@ -284,7 +338,7 @@ export function ProductsPage() {
           </CardContent>
         </Card>
 
-        <Card className="border-gray-200 shadow-sm">
+        <Card className="border-outline-variant/40 shadow-sm">
           <CardContent className="pt-6">
             <div className="flex items-center justify-between">
               <div>
@@ -316,7 +370,7 @@ export function ProductsPage() {
           </CardContent>
         </Card>
 
-        <Card className="border-gray-200 shadow-sm">
+        <Card className="border-outline-variant/40 shadow-sm">
           <CardContent className="pt-6">
             <div className="flex items-center justify-between">
               <div>
@@ -350,7 +404,7 @@ export function ProductsPage() {
           </CardContent>
         </Card>
 
-        <Card className="border-gray-200 shadow-sm">
+        <Card className="border-outline-variant/40 shadow-sm">
           <CardContent className="pt-6">
             <div className="flex items-center justify-between">
               <div>
@@ -361,7 +415,7 @@ export function ProductsPage() {
                   animate
                 />
               </div>
-              <div className="w-12 h-12 bg-indigo-50 rounded-xl flex items-center justify-center">
+              <div className="w-12 h-12 bg-primary-fixed rounded-xl flex items-center justify-center">
                 <BarChart3 className="w-6 h-6 text-indigo-600" />
               </div>
             </div>
@@ -376,7 +430,7 @@ export function ProductsPage() {
 
       {/* Analytics Row */}
       <div className="grid grid-cols-1 lg:grid-cols-2 gap-6">
-        <Card className="border-gray-200 shadow-sm">
+        <Card className="border-outline-variant/40 shadow-sm">
           <CardHeader className="flex flex-row items-center justify-between space-y-0">
             <CardTitle className="text-lg font-semibold text-gray-900">
               Sales History
@@ -385,7 +439,7 @@ export function ProductsPage() {
               value={rangeLine}
               onValueChange={(v) => setRangeLine(v as any)}
             >
-              <SelectTrigger className="w-[120px] h-8 text-xs bg-gray-50">
+              <SelectTrigger className="w-[120px] h-8 text-xs bg-surface-container-low">
                 <SelectValue placeholder="Range" />
               </SelectTrigger>
               <SelectContent>
@@ -398,7 +452,7 @@ export function ProductsPage() {
           </CardHeader>
           <CardContent>
             {salesHistoryData.length === 0 ? (
-              <div className="h-[250px] flex flex-col items-center justify-center text-gray-400 bg-gray-50/50 rounded-xl border border-dashed border-gray-200">
+              <div className="h-[250px] flex flex-col items-center justify-center text-gray-400 bg-surface-container-low/50 rounded-xl border border-dashed border-outline-variant/40">
                 <BarChart3 className="w-10 h-10 mb-2 opacity-20" />
                 <p className="text-sm font-medium">
                   No sales recorded for this period
@@ -469,7 +523,7 @@ export function ProductsPage() {
           </CardContent>
         </Card>
 
-        <Card className="border-gray-200 shadow-sm">
+        <Card className="border-outline-variant/40 shadow-sm">
           <CardHeader className="flex flex-row items-center justify-between space-y-0">
             <CardTitle className="text-lg font-semibold text-gray-900">
               Top Products (Revenue)
@@ -478,7 +532,7 @@ export function ProductsPage() {
               value={rangeBar}
               onValueChange={(v) => setRangeBar(v as any)}
             >
-              <SelectTrigger className="w-[120px] h-8 text-xs bg-gray-50">
+              <SelectTrigger className="w-[120px] h-8 text-xs bg-surface-container-low">
                 <SelectValue placeholder="Range" />
               </SelectTrigger>
               <SelectContent>
@@ -491,7 +545,7 @@ export function ProductsPage() {
           </CardHeader>
           <CardContent>
             {topProductsByRevenue.length === 0 ? (
-              <div className="h-[250px] flex flex-col items-center justify-center text-gray-400 bg-gray-50/50 rounded-xl border border-dashed border-gray-200">
+              <div className="h-[250px] flex flex-col items-center justify-center text-gray-400 bg-surface-container-low/50 rounded-xl border border-dashed border-outline-variant/40">
                 <TrendingUp className="w-10 h-10 mb-2 opacity-20" />
                 <p className="text-sm font-medium">
                   Start selling to unlock performance data
@@ -542,8 +596,124 @@ export function ProductsPage() {
         </Card>
       </div>
 
+      {/* Product Catalog */}
+      <Card className="border-outline-variant/40 shadow-sm">
+        <CardHeader className="flex flex-row items-center justify-between space-y-0">
+          <CardTitle className="text-lg font-semibold text-gray-900">
+            Product Catalog
+          </CardTitle>
+          <span className="text-xs font-medium text-gray-500">
+            {totalProducts} {totalProducts === 1 ? "product" : "products"} ·
+            click a column to sort
+          </span>
+        </CardHeader>
+        <CardContent>
+          <div className="rounded-xl border border-outline-variant/40 overflow-hidden">
+            <div className="max-h-[520px] overflow-auto">
+              <Table>
+                <TableHeader className="sticky top-0 z-10 bg-surface-container-lowest">
+                  <TableRow>
+                    <TableHead className="cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("name")}>
+                      <div className="flex items-center gap-1">
+                        Product Name
+                        {sortConfig.key === "name" ? (sortConfig.direction === "asc" ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <ChevronDown className="w-4 h-4 opacity-0 group-hover:opacity-50" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("sku")}>
+                      <div className="flex items-center gap-1">
+                        SKU
+                        {sortConfig.key === "sku" ? (sortConfig.direction === "asc" ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <ChevronDown className="w-4 h-4 opacity-0 group-hover:opacity-50" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("category")}>
+                      <div className="flex items-center gap-1">
+                        Category
+                        {sortConfig.key === "category" ? (sortConfig.direction === "asc" ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <ChevronDown className="w-4 h-4 opacity-0 group-hover:opacity-50" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("stock")}>
+                      <div className="flex items-center gap-1">
+                        Stock
+                        {sortConfig.key === "stock" ? (sortConfig.direction === "asc" ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <ChevronDown className="w-4 h-4 opacity-0 group-hover:opacity-50" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="text-right cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("price")}>
+                      <div className="flex items-center gap-1 justify-end">
+                        Price
+                        {sortConfig.key === "price" ? (sortConfig.direction === "asc" ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <ChevronDown className="w-4 h-4 opacity-0 group-hover:opacity-50" />}
+                      </div>
+                    </TableHead>
+                    <TableHead className="text-right cursor-pointer hover:text-indigo-600 transition-colors group" onClick={() => handleSort("soldToday")}>
+                      <div className="flex items-center gap-1 justify-end">
+                        Sold Today
+                        {sortConfig.key === "soldToday" ? (sortConfig.direction === "asc" ? <ChevronUp className="w-4 h-4" /> : <ChevronDown className="w-4 h-4" />) : <ChevronDown className="w-4 h-4 opacity-0 group-hover:opacity-50" />}
+                      </div>
+                    </TableHead>
+                  </TableRow>
+                </TableHeader>
+                <TableBody>
+                  {sortedProducts.length === 0 ? (
+                    <TableRow>
+                      <TableCell colSpan={6} className="h-32 text-center text-gray-400">
+                        <Package className="w-8 h-8 mx-auto mb-2 opacity-20" />
+                        <p className="text-sm font-medium">No products yet</p>
+                      </TableCell>
+                    </TableRow>
+                  ) : (
+                    sortedProducts.map((p: any) => (
+                      <TableRow
+                        key={p.id}
+                        onClick={() => {
+                          setSelectedProductForDetail(p);
+                          setIsDetailModalOpen(true);
+                        }}
+                        className="cursor-pointer"
+                      >
+                        <TableCell className="font-semibold text-gray-900">
+                          {p.name}
+                        </TableCell>
+                        <TableCell className="text-gray-500">
+                          {p.sku || "—"}
+                        </TableCell>
+                        <TableCell>
+                          <Badge
+                            variant="outline"
+                            className="font-normal"
+                          >
+                            {p.category || "Uncategorized"}
+                          </Badge>
+                        </TableCell>
+                        <TableCell>
+                          <span
+                            className={
+                              p.stock === 0
+                                ? "text-red-600 font-semibold"
+                                : p.stock < 10
+                                  ? "text-orange-600 font-semibold"
+                                  : "text-gray-700"
+                            }
+                          >
+                            {p.stock ?? 0}
+                          </span>
+                        </TableCell>
+                        <TableCell className="text-right font-medium text-gray-700">
+                          {formatCurrency(p.price)}
+                        </TableCell>
+                        <TableCell className="text-right text-gray-500">
+                          {p.soldToday}
+                        </TableCell>
+                      </TableRow>
+                    ))
+                  )}
+                </TableBody>
+              </Table>
+            </div>
+          </div>
+        </CardContent>
+      </Card>
+
       {/* Price Optimization */}
-      <Card className="border-gray-200 shadow-sm">
+      <Card className="border-outline-variant/40 shadow-sm">
         <CardHeader>
           <CardTitle className="text-lg font-semibold text-gray-900">Price Optimization Suggestions</CardTitle>
         </CardHeader>
@@ -571,12 +741,12 @@ export function ProductsPage() {
                 .filter(p => p.suggestion)
                 .slice(0, 5);
               if (suggestions.length === 0) {
-                return <div className="h-[250px] flex flex-col items-center justify-center text-gray-400 bg-gray-50/50 rounded-xl border border-dashed border-gray-200"><TrendingUp className="w-10 h-10 mb-2 opacity-20" /><p className="text-sm font-medium">All products look healthy</p></div>;
+                return <div className="h-[250px] flex flex-col items-center justify-center text-gray-400 bg-surface-container-low/50 rounded-xl border border-dashed border-outline-variant/40"><TrendingUp className="w-10 h-10 mb-2 opacity-20" /><p className="text-sm font-medium">All products look healthy</p></div>;
               }
               return (
                 <div className="space-y-3">
                   {suggestions.map(p => (
-                    <div key={p.id} className="flex items-center justify-between p-3 rounded-xl bg-gray-50 border border-gray-100">
+                    <div key={p.id} className="flex items-center justify-between p-3 rounded-xl bg-surface-container-low border border-outline-variant/40">
                       <div className="flex-1 min-w-0">
                         <p className="text-sm font-bold text-gray-900 truncate">{p.name}</p>
                         <p className="text-xs text-gray-500 mt-0.5">
@@ -601,10 +771,11 @@ export function ProductsPage() {
         isOpen={isAddModalOpen}
         onClose={() => setIsAddProductOpen(false)}
         product={selectedProductForEdit}
-        onSave={(data) => {
+        onSave={async (data) => {
           if (selectedProductForEdit) {
             updateProduct({ ...selectedProductForEdit, ...data });
           } else {
+            const imageUrl = await fetchProductImage(data.name);
             addProduct({
               name: data.name,
               sku: data.sku,
@@ -618,6 +789,7 @@ export function ProductsPage() {
               costPrice: data.costPrice,
               supplier: data.supplier,
               barcode: data.barcode,
+              imageUrl,
               storeId: currentStore.id,
             });
             if (currentUser?.role !== "Admin") {
@@ -645,6 +817,6 @@ export function ProductsPage() {
         onClose={() => setIsDetailModalOpen(false)}
         product={selectedProductForDetail}
       />
-    </div>
+    </Stagger>
   );
 }

@@ -502,7 +502,7 @@ export function AIChatModal({ open, onClose }: AIChatModalProps) {
                 <span className="text-[9px] font-black text-gray-400 uppercase tracking-widest">Live Sync</span>
               </div>
               <div className="h-4 w-[1px] bg-white/10 mx-1" />
-              <Button variant="ghost" size="icon" className="text-gray-500 hover:text-white h-8 w-8 rounded-lg" title="Share Chat">
+              <Button variant="ghost" size="icon" className="text-gray-500 hover:text-white h-8 w-8 rounded-lg">
                 <Share2 className="w-4 h-4" />
               </Button>
               <Button variant="ghost" size="icon" className="text-gray-500 hover:text-white h-8 w-8 rounded-lg md:hidden" onClick={() => {/* Toggle sidebar logic */}}>
@@ -539,7 +539,7 @@ export function AIChatModal({ open, onClose }: AIChatModalProps) {
                         
                         {msg.role === "ai" && (
                           <div className="mt-6 flex items-center gap-2 opacity-0 group-hover:opacity-100 transition-opacity duration-300">
-                            <Button variant="ghost" size="icon" className="h-8 w-8 text-gray-500 hover:text-white" onClick={() => copyToClipboard(msg.content)} title="Copy">
+                            <Button variant="ghost" size="icon" className="h-8 w-8 text-gray-500 hover:text-white" onClick={() => copyToClipboard(msg.content)}>
                               <Copy className="w-3.5 h-3.5" />
                             </Button>
                             <Button 
@@ -577,7 +577,7 @@ export function AIChatModal({ open, onClose }: AIChatModalProps) {
                               <p className="text-[9px] font-bold text-gray-500 uppercase tracking-widest mt-1">Real-time store analysis</p>
                             </div>
                             <div className="flex gap-2">
-                              <Button variant="ghost" size="icon" className="h-7 w-7 text-gray-500 hover:text-white border border-white/5 rounded-md" title="Download Image">
+                              <Button variant="ghost" size="icon" className="h-7 w-7 text-gray-500 hover:text-white border border-white/5 rounded-md">
                                 <FileDown className="w-3.5 h-3.5" />
                               </Button>
                               <Badge variant="outline" className="border-white/10 text-gray-500 text-[9px] font-bold py-0.5 px-2 rounded-md uppercase tracking-tighter">AI CORE</Badge>
@@ -664,7 +664,7 @@ export function AIChatModal({ open, onClose }: AIChatModalProps) {
                 />
                 <div className="flex items-center justify-between px-2 py-1 border-t border-white/5 mt-1">
                   <div className="flex items-center gap-1">
-                    <Button variant="ghost" size="icon" className="h-8 w-8 text-gray-500 hover:text-white hover:bg-white/5 rounded-lg transition-colors" title="Attach File">
+                    <Button variant="ghost" size="icon" className="h-8 w-8 text-gray-500 hover:text-white hover:bg-white/5 rounded-lg transition-colors">
                       <Paperclip className="w-4 h-4" />
                     </Button>
                     <Button 
@@ -672,11 +672,10 @@ export function AIChatModal({ open, onClose }: AIChatModalProps) {
                       size="icon" 
                       className={`h-8 w-8 rounded-lg transition-all ${isListening ? "text-red-500 animate-pulse" : "text-gray-500 hover:text-white hover:bg-white/5"}`}
                       onClick={toggleListening}
-                      title="Voice Input"
                     >
                       <Mic className="w-4 h-4" />
                     </Button>
-                    <Button variant="ghost" size="icon" className="h-8 w-8 text-gray-500 hover:text-white hover:bg-white/5 rounded-lg transition-colors" onClick={handleRegenerate} title="Regenerate">
+                    <Button variant="ghost" size="icon" className="h-8 w-8 text-gray-500 hover:text-white hover:bg-white/5 rounded-lg transition-colors" onClick={handleRegenerate}>
                       <RotateCcw className="w-3.5 h-3.5" />
                     </Button>
                   </div>
@@ -724,11 +723,11 @@ export function AIChatModal({ open, onClose }: AIChatModalProps) {
                     <div className="px-1.5 py-0.5 rounded bg-green-500/10 text-green-500 text-[8px] font-black uppercase tracking-widest border border-green-500/20">Active</div>
                   </div>
                   <div className="flex items-end justify-between">
-                    <p className="text-xl font-bold text-white">₦{kpis.totalRevenueToday.toLocaleString()}</p>
+                    <p className="text-xl font-bold text-white">₦{kpis.totalRevenue24h.toLocaleString()}</p>
                     <div className="flex flex-col items-end">
-                      <div className={`flex items-center gap-1 text-[10px] font-bold ${kpis.totalRevenueTodayChange >= 0 ? "text-green-500" : "text-red-500"}`}>
+                      <div className={`flex items-center gap-1 text-[10px] font-bold ${kpis.totalRevenue24hChange >= 0 ? "text-green-500" : "text-red-500"}`}>
                         <TrendingUp className="w-3 h-3" />
-                        {kpis.totalRevenueTodayChange}%
+                        {kpis.totalRevenue24hChange}%
                       </div>
                       <p className="text-[8px] text-gray-600 font-bold uppercase">vs Yesterday</p>
                     </div>
@@ -994,7 +993,7 @@ function generateAIResponse(question: string, data: any): Message {
     return {
       id: `msg-ai-${Date.now()}`,
       role: "ai",
-      content: `### Business Performance Report\n\nI've compiled the requested analytics based on your store's live data streams. Total revenue recorded for this period is **₦${kpis.totalRevenueToday.toLocaleString()}**.\n\n**Performance Highlights:**\n- **Growth:** You've seen a **${kpis.totalRevenueTodayChange > 0 ? "+" : ""}${kpis.totalRevenueTodayChange}%** shift in average volume.\n- **Top Channel:** Direct walk-in sales contributed 68% of today's revenue.\n- **Trend Analysis:** The upward trajectory on Friday suggests successful weekend preparation.\n\nI've generated a performance forecast chart below:`,
+      content: `### Business Performance Report\n\nI've compiled the requested analytics based on your store's live data streams. Total revenue recorded for this period is **₦${kpis.totalRevenue24h.toLocaleString()}**.\n\n**Performance Highlights:**\n- **Growth:** You've seen a **${kpis.totalRevenue24hChange > 0 ? "+" : ""}${kpis.totalRevenue24hChange}%** shift in average volume.\n- **Top Channel:** Direct walk-in sales contributed 68% of today's revenue.\n- **Trend Analysis:** The upward trajectory on Friday suggests successful weekend preparation.\n\nI've generated a performance forecast chart below:`,
       chart: {
         chartType: "area",
         title: "Revenue Forecast & Trends",
@@ -1074,7 +1073,7 @@ function generateAIResponse(question: string, data: any): Message {
   }
 
   if (q.includes("average order value") || q.includes("aov") || q.includes("insights")) {
-    const aov = transactions.length > 0 ? kpis.totalRevenueToday / transactions.length : 0;
+    const aov = transactions.length > 0 ? kpis.totalRevenue24h / transactions.length : 0;
     return {
       id: `msg-ai-${Date.now() + 4}`,
       role: "ai",

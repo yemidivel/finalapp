@@ -39,17 +39,17 @@ export function ReportPreviewModal({ open, onClose, report, onEmail, onSMS, onDo
     const categoryTotals: Record<string, number> = {};
     completedTx.forEach((tx) => {
       tx.items.forEach((it) => {
-        const p = invMap[Number(it.productId)];
+        const p = invMap[it.productId];
         const cat = p?.category || "Uncategorized";
         categoryTotals[cat] = (categoryTotals[cat] || 0) + (Number(it.qty) || 0) * (Number(it.price) || 0);
       });
     });
     const topCategory = Object.entries(categoryTotals).sort((a, b) => b[1] - a[1])[0]?.[0];
 
-    const productTotals: Record<number, { revenue: number; units: number }> = {};
+    const productTotals: Record<string, { revenue: number; units: number }> = {};
     completedTx.forEach((tx) => {
       tx.items.forEach((it) => {
-        const id = Number(it.productId);
+        const id = it.productId;
         const qty = Number(it.qty) || 0;
         const rev = qty * (Number(it.price) || 0);
         productTotals[id] = productTotals[id] || { revenue: 0, units: 0 };
@@ -58,7 +58,7 @@ export function ReportPreviewModal({ open, onClose, report, onEmail, onSMS, onDo
       });
     });
     const topProduct = Object.entries(productTotals)
-      .map(([id, s]) => ({ id: Number(id), ...s, name: invMap[Number(id)]?.name || `#${id}` }))
+      .map(([id, s]) => ({ id, ...s, name: invMap[id]?.name || `#${id}` }))
       .sort((a, b) => b.revenue - a.revenue)[0];
 
     const stockOnHand = inventoryArray.reduce((sum, p) => sum + p.stock, 0);
