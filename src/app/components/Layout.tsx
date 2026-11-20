@@ -18,8 +18,6 @@ import {
   RefreshCcw,
   ArrowLeft,
   Store as StoreIcon,
-  ChevronsUpDown,
-
   SlidersHorizontal,
 } from "lucide-react";
 import { Avatar, AvatarFallback } from "./ui/avatar";
@@ -314,13 +312,11 @@ export function Layout() {
             where the Admin is not scoped to a single store. */}
         {!showAdminOverview && (
           <div className="px-3 pt-4">
-            <button
-              type="button"
-              onClick={() => setIsSelectStoreModalOpen(true)}
-              className={`w-full flex items-center justify-between gap-3 p-3 rounded-xl border transition-colors text-left group ${
+            <div
+              className={`w-full flex items-center gap-3 p-3 rounded-xl border ${
                 theme === 'dark'
-                  ? 'bg-gray-800/60 border-gray-800 hover:bg-gray-800'
-                  : 'bg-surface-container-lowest border-outline-variant/40 shadow-[0_1px_3px_rgba(15,23,42,0.05)] hover:bg-surface-container-low'
+                  ? 'bg-gray-800/60 border-gray-800'
+                  : 'bg-surface-container-lowest border-outline-variant/40 shadow-[0_1px_3px_rgba(15,23,42,0.05)]'
               }`}
             >
               <div className="flex items-center gap-3 min-w-0">
@@ -343,8 +339,7 @@ export function Layout() {
                   </span>
                 </div>
               </div>
-              <ChevronsUpDown className="w-4 h-4 text-on-surface-variant shrink-0" />
-            </button>
+            </div>
           </div>
         )}
 

@@ -2747,38 +2747,40 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
           }
     > = {};
 
-    for (const s of stores) {
-      const [products, transactions, cashiers, managers, categories] = await Promise.allSettled([
-        db.products.fetch(s.id),
-        db.transactions.fetch(s.id),
-        db.cashiers.fetch(s.id),
-        db.managers.fetch(s.id),
-        db.categories.fetch(s.id),
-      ]);
-      let terminals: DbTerminal[] = [];
-      try {
-        terminals = (await db.terminals.fetch(s.id)).terminals;
-      } catch {
-        /* cashiers can't fetch terminals — leave empty */
-      }
-      byStore[s.id] = {
-        products:
-          products.status === "fulfilled"
-            ? products.value.products
-            : reportHydrationFailure("products", s.id, products.reason),
-        transactions:
-          transactions.status === "fulfilled"
-            ? transactions.value.transactions
-            : [],
-        cashiers: cashiers.status === "fulfilled" ? cashiers.value.cashiers : [],
-        managers: managers.status === "fulfilled" ? managers.value.managers : [],
-        terminals,
-        categories:
-          categories.status === "fulfilled"
-            ? categories.value.categories.map((c) => c.name)
-            : [],
-      };
-    }
+    await Promise.all(
+      stores.map(async (s) => {
+        const [products, transactions, cashiers, managers, categories] = await Promise.allSettled([
+          db.products.fetch(s.id),
+          db.transactions.fetch(s.id),
+          db.cashiers.fetch(s.id),
+          db.managers.fetch(s.id),
+          db.categories.fetch(s.id),
+        ]);
+        let terminals: DbTerminal[] = [];
+        try {
+          terminals = (await db.terminals.fetch(s.id)).terminals;
+        } catch {
+          /* cashiers can't fetch terminals — leave empty */
+        }
+        byStore[s.id] = {
+          products:
+            products.status === "fulfilled"
+              ? products.value.products
+              : reportHydrationFailure("products", s.id, products.reason),
+          transactions:
+            transactions.status === "fulfilled"
+              ? transactions.value.transactions
+              : [],
+          cashiers: cashiers.status === "fulfilled" ? cashiers.value.cashiers : [],
+          managers: managers.status === "fulfilled" ? managers.value.managers : [],
+          terminals,
+          categories:
+            categories.status === "fulfilled"
+              ? categories.value.categories.map((c) => c.name)
+              : [],
+        };
+      }),
+    );
 
     dispatch({
       type: "HYDRATE_DB",
@@ -2792,11 +2794,11 @@ export function StoreProvider({ children }: { children: React.ReactNode }) {
       },
     });
 
-    // The dashboard reads its figures from the backend, so ask for them as part
-    // of signing in rather than waiting for the first render to notice they are
-    // missing. A failure here leaves the local derivation in place.
-    await Promise.allSettled(stores.map((s) => refreshAnalytics(s.id)));
-    await Promise.allSettled(stores.map((s) => refreshStoreInsight(s.id)));
+    // Kick off chart/insight refreshes without blocking the first paint.
+    // Analytics and AI insights can take seconds (the insight route calls an
+    // LLM), and the dashboard already has the hydrated store data to render.
+    void Promise.allSettled(stores.map((s) => refreshAnalytics(s.id)));
+    void Promise.allSettled(stores.map((s) => refreshStoreInsight(s.id)));
   }, []);
 
   React.useEffect(() => {
