@@ -41,6 +41,7 @@ import {
   canUserAccessStore,
   verifyUserPassword,
 } from "../../lib/rbac";
+import { LANDING_URL } from "../../lib/db";
 import { Onboarding } from "./Onboarding";
 import { Login } from "./Login";
 
@@ -262,9 +263,7 @@ export function Layout() {
       loading: "Logging out...",
       success: () => {
         logoutUser();
-        const landingUrl =
-          import.meta.env.VITE_LANDING_URL || "http://localhost:3001";
-        window.location.href = `${landingUrl}/login`;
+        window.location.href = `${LANDING_URL}/login`;
         return "Logged out successfully";
       },
       error: "Logout failed"

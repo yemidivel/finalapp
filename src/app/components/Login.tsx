@@ -4,6 +4,7 @@ import { Input } from "./ui/input";
 import { Label } from "./ui/label";
 import { toast } from "sonner";
 import { useStore } from "../state/store";
+import { LANDING_URL } from "../../lib/db";
 import { LogIn, ShieldCheck } from "lucide-react";
 
 /**
@@ -18,9 +19,6 @@ export function Login() {
   const [email, setEmail] = useState("");
   const [password, setPassword] = useState("");
   const [submitting, setSubmitting] = useState(false);
-
-  const landingUrl =
-    import.meta.env.VITE_LANDING_URL || "http://localhost:3001";
 
   const handleSubmit = async (e: React.FormEvent) => {
     e.preventDefault();
@@ -113,7 +111,7 @@ export function Login() {
 
           <div className="text-center">
             <a
-              href={`${landingUrl}/signup`}
+              href={`${LANDING_URL}/signup`}
               className="inline-flex items-center gap-1.5 text-xs font-bold text-indigo-600 hover:text-indigo-700"
             >
               <ShieldCheck className="w-3.5 h-3.5" />

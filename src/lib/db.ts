@@ -31,6 +31,10 @@ export const API_BASE =
   import.meta.env.VITE_API_BASE_URL ||
   (isLocalHost ? "http://localhost:5000" : "https://api.sellsync.store");
 
+export const LANDING_URL =
+  import.meta.env.VITE_LANDING_URL ||
+  (isLocalHost ? "http://localhost:3001" : "https://sellsync.store");
+
 const TOKEN_KEY = "sellsync_token";
 
 // =============================================================================
